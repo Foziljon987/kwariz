@@ -4,10 +4,12 @@ import { ThemeProvider } from 'next-themes';
 import App from './App.tsx';
 import './index.css';
 
+const NextThemesProvider = ThemeProvider as any;
+
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <ThemeProvider attribute="class" defaultTheme="light">
+    <NextThemesProvider attribute="class" defaultTheme="light">
       <App />
-    </ThemeProvider>
+    </NextThemesProvider>
   </StrictMode>,
 );

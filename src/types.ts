@@ -5,6 +5,7 @@ export interface UserProfile {
   sex: string;
   country: string;
   region: string;
+  jobTitle: string;
 }
 
 export interface Subject {

@@ -1,5 +1,5 @@
 import { GoogleGenAI, Type } from "@google/genai";
-import { GradeConfig, Teacher, ScheduleResult } from "../types";
+import { GradeConfig, Teacher, ScheduleResult, Subject } from "../types";
 
 let aiInstance: GoogleGenAI | null = null;
 
@@ -16,32 +16,62 @@ function getAI() {
 
 export async function generateSchedule(
   grades: GradeConfig[],
-  teachers: Teacher[]
+  teachers: Teacher[],
+  country: string,
+  region: string,
+  lang: string
 ): Promise<ScheduleResult> {
   const ai = getAI();
   const prompt = `
-    Create a school schedule based on the following data:
+    Create a school schedule for ${country}, ${region} in ${lang}.
     
-    Grades Configuration:
-    ${JSON.stringify(grades, null, 2)}
+    DATA:
+    Grades: ${JSON.stringify(grades)}
+    Teachers: ${JSON.stringify(teachers)}
     
-    Teachers:
-    ${JSON.stringify(teachers, null, 2)}
+    RULES:
+    1. CLASS NAMES: Use ONLY "Number Letter" format (e.g., "1 A", "1 B", "2 A", "5 C").
+    2. NO CONFLICTS: A teacher or class cannot have two lessons simultaneously.
+    3. FULL TIMETABLE: You MUST fill as many slots as possible. Each class MUST have at least 6-8 lessons scheduled EVERY day (Monday-Friday).
+       - If you have Grade 5 with 3 classes (A, B, C), you must provide schedules for: "5 A", "5 B", and "5 C".
+       - Total lessons intended: (Number of total classes) * (Avg 7 lessons/day) * 5 days.
+    4. VARIETY: One subject per class/day. Spread multi-hour subjects across the week.
+    5. SLOTS (45m + 5m break): 08:00-08:45, 08:50-09:35, 09:40-10:25, 10:30-11:15, 11:20-12:05, 12:10-12:55, 13:00-13:45, 13:50-14:35.
     
-    Rules:
-    - School starts at 8:00 AM.
-    - Each lesson is 45 minutes.
-    - 5-minute break between lessons.
-    - Try to schedule one teacher's lessons in one order (consecutive if possible).
-    - Detect and flag any conflicts.
-    - Calculate total hours per teacher and per grade.
-    - Days: Monday to Friday.
+    CRITICAL FORMATTING:
+    - "day" MUST be one of: "Monday", "Tuesday", "Wednesday", "Thursday", "Friday".
+    - "startTime" and "endTime" MUST match the slots above exactly.
+    - "grade" is the number (e.g., 5).
+    - "className" is ONLY the letter (e.g., "A").
     
-    Return the result in the specified JSON format.
+    CRITICAL UZBEK TRANSLATIONS:
+    MANDATORY MAPPING: You MUST use these exact Uzbek names for ALL subject names in the entire output:
+    - Mathematics -> Matematika
+    - English -> Ingliz tili
+    - History -> Tarix
+    - Literature -> Adabiyot
+    - Biology -> Biologiya
+    - Physics -> Fizika
+    - Chemistry -> Kimyo
+    - Native Language -> Ona tili
+    - Sports -> Jismoniy tarbiya
+    - Informatics -> Informatika
+    - Art -> Tasviriy san'at
+    - Music -> Musiqa
+    - Geography -> Geografiya
+    - Technology -> Texnologiya
+    - Education for Democracy -> Tarbiya
+
+    Return strictly JSON matching the schema.
+    
+    CRITICAL:
+    1. LANGUAGE: Every subject name MUST be translated into ${lang} (Uzbek preferred).
+    2. COMPLETENESS: A partial schedule is a failure. Fill every day from 08:00 to at least 13:45.
+    3. FORMATTING: Use "day", "startTime", "endTime", "grade", "className" (Letter only).
   `;
 
   const response = await ai.models.generateContent({
-    model: "gemini-3.1-pro-preview",
+    model: "gemini-3-flash-preview",
     contents: prompt,
     config: {
       responseMimeType: "application/json",
@@ -95,4 +125,79 @@ export async function generateSchedule(
   }
 
   return JSON.parse(response.text) as ScheduleResult;
+}
+
+export async function suggestSubjects(
+  country: string,
+  region: string,
+  grade: number,
+  lang: string
+): Promise<Subject[]> {
+  const ai = getAI();
+  const prompt = `
+    Suggest a list of typical school subjects for Grade ${grade} in ${country}, ${region}.
+    
+    Target Language: ${lang}
+    
+    REQUIREMENT: The total hours per week should sum up to approximately 35-40 hours to support a schedule with at least 7 lessons per day.
+    Example: [{"name": "Mathematics", "hoursPerWeek": 5}, {"name": "Physics", "hoursPerWeek": 3}]
+  `;
+
+  const response = await ai.models.generateContent({
+    model: "gemini-3-flash-preview",
+    contents: prompt,
+    config: {
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: Type.ARRAY,
+        items: {
+          type: Type.OBJECT,
+          properties: {
+            name: { type: Type.STRING },
+            hoursPerWeek: { type: Type.NUMBER },
+          },
+          required: ["name", "hoursPerWeek"],
+        },
+      },
+    },
+  });
+
+  return JSON.parse(response.text || "[]") as Subject[];
+}
+
+export async function suggestTeachers(
+  subjects: string[],
+  totalClasses: number,
+  lang: string
+): Promise<Teacher[]> {
+  const ai = getAI();
+  const prompt = `
+    Given these subjects: ${subjects.join(", ")} and a total of ${totalClasses} classes, suggest a sufficient list of teachers.
+    
+    Target Language: ${lang}
+    
+    GUIDELINE: Ensure there are enough teachers so that at peak times (when multiple classes have the same subject), the schedule remains feasible. Suggest approximately 1 teacher for every 2-3 total classes for major subjects, or at least 2-3 teachers per subject if classes are numerous.
+  `;
+
+  const response = await ai.models.generateContent({
+    model: "gemini-3-flash-preview",
+    contents: prompt,
+    config: {
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: Type.ARRAY,
+        items: {
+          type: Type.OBJECT,
+          properties: {
+            id: { type: Type.STRING },
+            name: { type: Type.STRING },
+            preferredSubjects: { type: Type.ARRAY, items: { type: Type.STRING } },
+          },
+          required: ["id", "name", "preferredSubjects"],
+        },
+      },
+    },
+  });
+
+  return JSON.parse(response.text || "[]") as Teacher[];
 }
