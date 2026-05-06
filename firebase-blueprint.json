@@ -1,0 +1,44 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "User Profile",
+      "description": "Stores user details, role, and payment status",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "surname": { "type": "string" },
+        "email": { "type": "string" },
+        "sex": { "type": "string" },
+        "country": { "type": "string" },
+        "region": { "type": "string" },
+        "jobTitle": { "type": "string" },
+        "role": { "type": "string", "enum": ["admin", "user"] },
+        "paymentStatus": { "type": "string", "enum": ["pending", "paid", "unlimited"] },
+        "createdAt": { "type": "number" }
+      },
+      "required": ["id", "name", "surname", "email", "role", "paymentStatus"]
+    },
+    "Schedule": {
+      "title": "User Schedule",
+      "description": "Stores generated schedules for backup or later retrieval",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "data": { "type": "object" },
+        "createdAt": { "type": "number" }
+      },
+      "required": ["userId", "data", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "User profile collection"
+    },
+    "/schedules/{scheduleId}": {
+      "schema": "Schedule",
+      "description": "Schedules collection"
+    }
+  }
+}

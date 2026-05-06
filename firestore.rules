@@ -1,0 +1,75 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && 
+             request.auth.token.email_verified == true && (
+               request.auth.token.email == 'rustamovfoziljon936@gmail.com' ||
+               (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+                get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin')
+             );
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // User Profile Rules
+    match /users/{userId} {
+      function isValidUser(data) {
+        return data.id is string && data.id == userId &&
+               data.id == request.auth.uid &&
+               data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
+               data.email is string && data.email == request.auth.token.email &&
+               request.auth.token.email_verified == true;
+      }
+
+      allow get: if isOwner(userId) || isAdmin();
+      allow list: if isAdmin();
+      
+      allow create: if isOwner(userId) && isValidId(userId) &&
+                      isValidUser(incoming()) && (
+                        (incoming().role == 'user' && incoming().paymentStatus == 'pending') ||
+                        (request.auth.token.email == 'rustamovfoziljon936@gmail.com' && incoming().role == 'admin' && incoming().paymentStatus == 'unlimited')
+                      );
+      
+      allow update: if (isOwner(userId) && 
+                       isValidUser(incoming()) && 
+                       incoming().role == existing().role && 
+                       incoming().paymentStatus == existing().paymentStatus) || 
+                       isAdmin();
+      
+      allow delete: if isAdmin();
+    }
+
+    // Schedule Rules
+    match /schedules/{scheduleId} {
+      allow read: if isSignedIn() && (existing().userId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() && (incoming().userId == request.auth.uid || isAdmin());
+      allow update: if isSignedIn() && (existing().userId == request.auth.uid || isAdmin());
+      allow delete: if isSignedIn() && (existing().userId == request.auth.uid || isAdmin());
+    }
+  }
+}

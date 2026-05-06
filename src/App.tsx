@@ -1,5 +1,8 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { UserProfile, GradeConfig, Teacher, ScheduleResult } from './types';
+import { auth, db, signInWithGoogle, logout, handleFirestoreError, OperationType } from './lib/firebase';
+import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
+import { doc, getDoc, setDoc, collection, onSnapshot, deleteDoc, updateDoc, query, where, getDocFromServer } from 'firebase/firestore';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -14,7 +17,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Toaster } from '@/components/ui/sonner';
 import { toast } from 'sonner';
 import { motion, AnimatePresence } from 'motion/react';
-import { User, School, Users, Calendar, AlertCircle, CheckCircle2, Plus, Trash2, ChevronRight, ChevronLeft, Loader2, Download, Languages } from 'lucide-react';
+import { User, School, Users, Calendar, AlertCircle, CheckCircle2, Plus, Trash2, ChevronRight, ChevronLeft, Loader2, Download, Languages, Sun, Moon } from 'lucide-react';
 import { generateSchedule, suggestSubjects, suggestTeachers } from './lib/gemini';
 import { exportScheduleToExcel } from './lib/excel';
 import { COUNTRIES, COUNTRIES_REGIONS } from './constants';
@@ -22,18 +25,129 @@ import { translations, Language } from './translations';
 
 export default function App() {
   const [lang, setLang] = useState<Language>('en');
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('theme') as 'light' | 'dark' || 'light';
+    }
+    return 'light';
+  });
   const t = translations[lang];
-  const [step, setStep] = useState<'register' | 'profile' | 'config' | 'result'>('register');
+  const [user, setUser] = useState<FirebaseUser | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [subscribers, setSubscribers] = useState<UserProfile[]>([]);
+  const [step, setStep] = useState<'register' | 'profile' | 'config' | 'result' | 'admin' | 'payment'>('register');
   const [grades, setGrades] = useState<GradeConfig[]>([]);
   const [teachers, setTeachers] = useState<Teacher[]>([]);
   const [scheduleResult, setScheduleResult] = useState<ScheduleResult | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
   const [isSuggesting, setIsSuggesting] = useState(false);
 
-  const handleRegister = (data: UserProfile) => {
-    setProfile(data);
-    setStep('profile');
+  useEffect(() => {
+    const root = window.document.documentElement;
+    root.classList.remove('light', 'dark');
+    root.classList.add(theme);
+    localStorage.setItem('theme', theme);
+  }, [theme]);
+
+  useEffect(() => {
+    const unsubscribeAuth = onAuthStateChanged(auth, async (firebaseUser) => {
+      if (firebaseUser) {
+        setUser(firebaseUser);
+        try {
+          const path = `users/${firebaseUser.uid}`;
+          const userDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
+          if (userDoc.exists()) {
+            const userData = userDoc.data() as UserProfile;
+            setProfile(userData);
+            if (userData.role === 'admin') {
+              setStep('admin');
+            } else if (userData.paymentStatus === 'pending') {
+              setStep('payment');
+            } else {
+              setStep('profile');
+            }
+          } else {
+            setStep('register');
+          }
+        } catch (error) {
+          // If offline, we might retry or just show error
+          if (error instanceof Error && error.message.includes('offline')) {
+            console.warn('Initial load failed: Client is offline. Firestore will retry automatically.');
+          } else {
+            handleFirestoreError(error, OperationType.GET, `users/${firebaseUser.uid}`);
+          }
+        }
+      } else {
+        setUser(null);
+        setProfile(null);
+        setStep('register');
+      }
+      setIsLoading(false);
+    });
+
+    return () => unsubscribeAuth();
+  }, []);
+
+  useEffect(() => {
+    if (profile?.role === 'admin') {
+      const path = 'users';
+      const unsubscribeUsers = onSnapshot(collection(db, path), (snapshot) => {
+        const users = snapshot.docs.map(doc => doc.data() as UserProfile);
+        setSubscribers(users);
+      }, (error) => {
+        handleFirestoreError(error, OperationType.GET, path);
+      });
+      return () => unsubscribeUsers();
+    }
+  }, [profile]);
+
+  const handleRegister = async (data: any) => {
+    if (!user) return;
+    const path = `users/${user.uid}`;
+    const newProfile: UserProfile = {
+      ...data,
+      id: user.uid,
+      email: user.email!,
+      role: user.email === 'rustamovfoziljon936@gmail.com' ? 'admin' : 'user',
+      paymentStatus: user.email === 'rustamovfoziljon936@gmail.com' ? 'unlimited' : 'pending',
+      createdAt: Date.now()
+    };
+    try {
+      await setDoc(doc(db, 'users', user.uid), newProfile);
+      setProfile(newProfile);
+      if (newProfile.role === 'admin') {
+        setStep('admin');
+      } else {
+        setStep('payment');
+      }
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, path);
+    }
+  };
+
+  const handlePaymentSuccess = async () => {
+    if (!user || !profile) return;
+    const path = `users/${user.uid}`;
+    const updatedProfile = { ...profile, paymentStatus: 'paid' as const };
+    try {
+      await updateDoc(doc(db, 'users', user.uid), { paymentStatus: 'paid' });
+      setProfile(updatedProfile);
+      setStep('profile');
+      toast.success("Payment confirmed! You can now generate schedules.");
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, path);
+    }
+  };
+
+  const handleDeleteUser = async (userId: string) => {
+    if (profile?.role !== 'admin') return;
+    const path = `users/${userId}`;
+    try {
+      await deleteDoc(doc(db, 'users', userId));
+      toast.success("User removed successfully.");
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, path);
+    }
   };
 
   const handleStart = () => {
@@ -46,6 +160,12 @@ export default function App() {
       return;
     }
     if (!profile) return;
+    
+    if (profile.role !== 'admin' && profile.paymentStatus !== 'paid' && profile.paymentStatus !== 'unlimited') {
+      setStep('payment');
+      toast.error("Please complete payment to generate schedules.");
+      return;
+    }
     
     setIsLoading(true);
     try {
@@ -84,16 +204,41 @@ export default function App() {
   };
 
   const handleReset = () => {
-    setStep('register');
-    setProfile(null);
+    if (profile?.role === 'admin') {
+        setStep('admin');
+    } else if (profile?.paymentStatus === 'paid') {
+        setStep('profile');
+    } else if (profile?.paymentStatus === 'pending') {
+        setStep('payment');
+    } else {
+        setStep('register');
+    }
     setGrades([]);
     setTeachers([]);
     setScheduleResult(null);
     toast.info(t.appReset);
   };
 
+  const handleLogin = async () => {
+    try {
+      await signInWithGoogle();
+      toast.success("Successfully logged in!");
+    } catch (error) {
+      console.error(error);
+      toast.error("Failed to login with Google.");
+    }
+  };
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-neutral-50 dark:bg-neutral-950">
+        <Loader2 className="w-8 h-8 animate-spin text-neutral-400" />
+      </div>
+    );
+  }
+
   return (
-    <div className="min-h-screen bg-neutral-50 font-sans text-neutral-900">
+    <div className="min-h-screen bg-neutral-50 dark:bg-neutral-950 font-sans text-neutral-900 dark:text-neutral-50">
       <div className="max-w-5xl mx-auto py-12 px-4">
         <div className="flex justify-between items-center mb-8">
           <div className="flex items-center space-x-3">
@@ -102,8 +247,16 @@ export default function App() {
             </div>
             <h1 className="text-xl font-bold tracking-tight">{t.title}</h1>
           </div>
-          <div className="flex items-center space-x-2">
-            <div className="flex items-center bg-white border border-neutral-200 rounded-full px-2 py-1 shadow-sm mr-2">
+          <div className="flex items-center space-x-4">
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
+              className="rounded-full w-9 h-9 text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800"
+            >
+              {theme === 'light' ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
+            </Button>
+            <div className="flex items-center bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-full px-2 py-1 shadow-sm">
               <Languages className="w-4 h-4 text-neutral-400 mr-2 ml-1" />
               <Select value={lang} onValueChange={(v: Language) => setLang(v)}>
                 <SelectTrigger className="border-none shadow-none h-7 bg-transparent focus:ring-0 text-xs w-24">
@@ -116,89 +269,278 @@ export default function App() {
                 </SelectContent>
               </Select>
             </div>
-            {profile && (
+            {user && (
+              <Button variant="ghost" size="sm" onClick={() => logout()} className="text-neutral-500 hover:text-red-500 rounded-full">
+                Logout
+              </Button>
+            )}
+            {profile && scheduleResult && (
               <Button variant="ghost" size="sm" onClick={handleReset} className="text-neutral-500 hover:text-red-500 rounded-full">
                 <Trash2 className="w-4 h-4 mr-2" /> {t.resetAll}
               </Button>
             )}
+            {profile?.role === 'admin' && step !== 'admin' && (
+              <Button variant="outline" size="sm" onClick={() => setStep('admin')} className="rounded-full">
+                Admin Panel
+              </Button>
+            )}
           </div>
         </div>
-        <AnimatePresence mode="wait">
-          {step === 'register' && (
-            <motion.div
-              key="register"
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -20 }}
-            >
-              <RegistrationForm onSubmit={handleRegister} t={t} lang={lang} />
-            </motion.div>
-          )}
+        
+        {!user ? (
+          <div className="flex flex-col items-center justify-center h-[60vh] space-y-6">
+            <Card className="w-full max-w-md border-none shadow-xl text-center p-8">
+              <div className="w-16 h-16 bg-neutral-100 rounded-2xl flex items-center justify-center mx-auto mb-6">
+                <Calendar className="w-8 h-8 text-neutral-900" />
+              </div>
+              <CardTitle className="text-2xl font-bold mb-2">School Scheduling AI</CardTitle>
+              <CardDescription className="mb-8">Sign in to start creating optimized school timetables in minutes.</CardDescription>
+              <Button onClick={handleLogin} size="lg" className="w-full h-14 bg-neutral-900 hover:bg-neutral-800 text-lg">
+                Sign in with Google
+              </Button>
+            </Card>
+          </div>
+        ) : (
+          <AnimatePresence mode="wait">
+            {step === 'register' && (
+              <motion.div
+                key="register"
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -20 }}
+              >
+                <RegistrationForm user={user} onSubmit={handleRegister} t={t} lang={lang} />
+              </motion.div>
+            )}
 
-          {step === 'profile' && profile && (
-            <motion.div
-              key="profile"
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -20 }}
-            >
-              <ProfileView profile={profile} onStart={handleStart} t={t} />
-            </motion.div>
-          )}
+            {step === 'payment' && profile && (
+               <motion.div
+                key="payment"
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -20 }}
+              >
+                <PaymentRequired onConfirm={handlePaymentSuccess} t={t} />
+              </motion.div>
+            )}
 
-          {step === 'config' && profile && (
-            <motion.div
-              key="config"
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -20 }}
-            >
-              <ScheduleWizard 
-                grades={grades} 
-                setGrades={setGrades} 
-                teachers={teachers} 
-                setTeachers={setTeachers} 
-                onGenerate={handleGenerate}
-                isLoading={isLoading}
-                profile={profile}
-                t={t}
-                lang={lang}
-              />
-            </motion.div>
-          )}
+            {step === 'admin' && profile?.role === 'admin' && (
+               <motion.div
+                key="admin"
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -20 }}
+              >
+                <AdminDashboard 
+                  subscribers={subscribers} 
+                  onDeleteUser={handleDeleteUser} 
+                  onStartScheduling={() => setStep('profile')}
+                  t={t} 
+                />
+              </motion.div>
+            )}
 
-          {step === 'result' && scheduleResult && (
-            <motion.div
-              key="result"
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -20 }}
-            >
-              <ScheduleResultView 
-                result={scheduleResult} 
-                onBack={() => setStep('config')} 
-                onRegenerate={handleGenerate}
-                isLoading={isLoading}
-                onUpdateSchedule={handleUpdateSchedule}
-                allTeachers={teachers}
-                allGrades={grades}
-                t={t}
-                lang={lang}
-              />
-            </motion.div>
-          )}
-        </AnimatePresence>
+            {step === 'profile' && profile && (
+              <motion.div
+                key="profile"
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -20 }}
+              >
+                <ProfileView profile={profile} onStart={handleStart} t={t} />
+              </motion.div>
+            )}
+
+            {step === 'config' && profile && (
+              <motion.div
+                key="config"
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -20 }}
+              >
+                <ScheduleWizard 
+                  grades={grades} 
+                  setGrades={setGrades} 
+                  teachers={teachers} 
+                  setTeachers={setTeachers} 
+                  onGenerate={handleGenerate}
+                  isLoading={isLoading}
+                  profile={profile}
+                  t={t}
+                  lang={lang}
+                />
+              </motion.div>
+            )}
+
+            {step === 'result' && scheduleResult && (
+              <motion.div
+                key="result"
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -20 }}
+              >
+                <ScheduleResultView 
+                  result={scheduleResult} 
+                  onBack={() => setStep('config')} 
+                  onRegenerate={handleGenerate}
+                  isLoading={isLoading}
+                  onUpdateSchedule={handleUpdateSchedule}
+                  allTeachers={teachers}
+                  allGrades={grades}
+                  t={t}
+                  lang={lang}
+                />
+              </motion.div>
+            )}
+          </AnimatePresence>
+        )}
       </div>
       <Toaster position="top-center" />
     </div>
   );
 }
 
-function RegistrationForm({ onSubmit, t, lang }: { onSubmit: (data: UserProfile) => void, t: any, lang: Language }) {
-  const [formData, setFormData] = useState<UserProfile>({
+function AdminDashboard({ subscribers, onDeleteUser, onStartScheduling, t }: { subscribers: UserProfile[], onDeleteUser: (id: string) => void, onStartScheduling: () => void, t: any }) {
+  return (
+    <div className="space-y-6 text-neutral-900 dark:text-neutral-100">
+      <div className="flex justify-between items-center bg-white dark:bg-neutral-900 p-6 rounded-2xl shadow-sm border border-neutral-200 dark:border-neutral-800">
+        <div>
+          <h2 className="text-2xl font-bold">Admin Panel</h2>
+          <p className="text-neutral-500">Manage subscribers and system settings</p>
+        </div>
+        <Button onClick={onStartScheduling} className="rounded-full bg-neutral-900">
+          Open Scheduler <ChevronRight className="ml-2 w-4 h-4" />
+        </Button>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <Card className="border-none shadow-sm dark:bg-neutral-900">
+          <CardHeader className="pb-2">
+            <CardDescription className="uppercase tracking-wider text-[10px] font-bold">Total Subscribers</CardDescription>
+            <CardTitle className="text-3xl font-black">{subscribers.length}</CardTitle>
+          </CardHeader>
+        </Card>
+        <Card className="border-none shadow-sm dark:bg-neutral-900">
+          <CardHeader className="pb-2">
+            <CardDescription className="uppercase tracking-wider text-[10px] font-bold">System Status</CardDescription>
+            <CardTitle className="text-3xl font-black text-green-500 underline underline-offset-8">Active</CardTitle>
+          </CardHeader>
+        </Card>
+        <Card className="border-none shadow-sm bg-neutral-900 text-white dark:bg-neutral-50 dark:text-neutral-900">
+          <CardHeader className="pb-2">
+            <CardDescription className="uppercase tracking-wider text-[10px] font-bold text-neutral-400 dark:text-neutral-500">Current Billing Method</CardDescription>
+            <CardTitle className="text-lg font-bold">UZCARD **** 4590</CardTitle>
+            <Button variant="outline" size="sm" className="mt-2 text-neutral-900 dark:text-neutral-50 border-white dark:border-neutral-800 hover:bg-white/10 dark:hover:bg-neutral-800">Change Card</Button>
+          </CardHeader>
+        </Card>
+      </div>
+
+      <Card className="border-none shadow-sm">
+        <CardHeader>
+          <CardTitle>Subscriber List</CardTitle>
+          <CardDescription>View and manage all registered users</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>User</TableHead>
+                <TableHead>Location</TableHead>
+                <TableHead>Role</TableHead>
+                <TableHead>Payment</TableHead>
+                <TableHead className="text-right">Actions</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {subscribers.map((u) => (
+                <TableRow key={u.id}>
+                  <TableCell className="font-medium">
+                    <div className="flex items-center space-x-3">
+                      <div className="w-8 h-8 rounded-full bg-neutral-100 flex items-center justify-center text-[10px]">
+                        {u.name[0]}{u.surname[0]}
+                      </div>
+                      <div>
+                        {u.name} {u.surname}
+                        <p className="text-xs text-neutral-400 font-normal">{u.email}</p>
+                      </div>
+                    </div>
+                  </TableCell>
+                  <TableCell className="text-xs text-neutral-500">{u.region}, {u.country}</TableCell>
+                  <TableCell>
+                    <Badge variant={u.role === 'admin' ? 'default' : 'outline'} className="text-[10px] uppercase">
+                      {u.role}
+                    </Badge>
+                  </TableCell>
+                  <TableCell>
+                    <Badge variant={u.paymentStatus === 'paid' || u.paymentStatus === 'unlimited' ? 'secondary' : 'destructive'} className="text-[10px] uppercase">
+                      {u.paymentStatus}
+                    </Badge>
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <Button 
+                      variant="ghost" 
+                      size="icon" 
+                      onClick={() => onDeleteUser(u.id)}
+                      className="text-neutral-400 hover:text-red-500"
+                      disabled={u.role === 'admin'}
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </Button>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+function PaymentRequired({ onConfirm, t }: { onConfirm: () => void, t: any }) {
+  return (
+    <Card className="max-w-2xl mx-auto border-none shadow-xl overflow-hidden">
+      <div className="bg-neutral-900 p-8 text-center text-white">
+        <div className="w-16 h-16 bg-white/10 rounded-full flex items-center justify-center mx-auto mb-4 backdrop-blur-sm">
+          <Calendar className="w-8 h-8" />
+        </div>
+        <h2 className="text-3xl font-bold mb-2">Registration Succeeded</h2>
+        <p className="text-neutral-400">One more step to unlock the AI School Scheduler</p>
+      </div>
+      <CardHeader className="text-center pb-0 pt-8">
+        <div className="space-y-1">
+          <CardTitle className="text-4xl font-black">10,000 UZS</CardTitle>
+          <CardDescription className="text-sm font-medium text-neutral-500">Service Activation Fee</CardDescription>
+        </div>
+      </CardHeader>
+      <CardContent className="p-8 space-y-6">
+        <div className="bg-neutral-50 dark:bg-neutral-900 rounded-2xl p-6 border border-neutral-100 dark:border-neutral-800 space-y-4">
+          <div className="flex justify-between items-center text-sm">
+            <span className="text-neutral-500">Beneficiary Card</span>
+            <span className="font-mono font-bold">8600 0000 0000 0000</span>
+          </div>
+          <div className="flex justify-between items-center text-sm">
+            <span className="text-neutral-500">Recipient Name</span>
+            <span className="font-bold">Admin Foziljon</span>
+          </div>
+          <Separator className="dark:bg-neutral-800" />
+          <p className="text-xs text-center text-neutral-400">
+            Please transfer the exact amount and wait for confirmation. 
+            For demonstration purposes, click the button below after payment.
+          </p>
+        </div>
+        <Button onClick={onConfirm} size="lg" className="w-full h-14 bg-neutral-900 dark:bg-neutral-50 dark:text-neutral-900 hover:bg-neutral-800 dark:hover:bg-neutral-200 text-lg font-bold">
+          Confirm Payment
+        </Button>
+      </CardContent>
+    </Card>
+  );
+}
+
+function RegistrationForm({ user, onSubmit, t, lang }: { user: any, onSubmit: (data: any) => void, t: any, lang: Language }) {
+  const [formData, setFormData] = useState({
     name: '',
     surname: '',
-    email: '',
     sex: 'other',
     country: '',
     region: '',
@@ -209,7 +551,7 @@ function RegistrationForm({ onSubmit, t, lang }: { onSubmit: (data: UserProfile)
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!formData.name || !formData.surname || !formData.email || !formData.country || !formData.region) {
+    if (!formData.name || !formData.surname || !formData.country || !formData.region) {
       toast.error(t.fillAll);
       return;
     }
@@ -217,16 +559,22 @@ function RegistrationForm({ onSubmit, t, lang }: { onSubmit: (data: UserProfile)
   };
 
   return (
-    <Card className="border-none shadow-xl shadow-neutral-200/50">
+    <Card className="border-none shadow-xl shadow-neutral-200/50 dark:bg-neutral-900 dark:shadow-none">
       <CardHeader className="space-y-1 pb-8">
-        <div className="w-12 h-12 bg-neutral-900 rounded-xl flex items-center justify-center mb-4">
-          <User className="text-white w-6 h-6" />
-        </div>
         <CardTitle className="text-3xl font-bold tracking-tight">{t.welcome}</CardTitle>
         <CardDescription className="text-neutral-500">{t.welcomeDesc}</CardDescription>
       </CardHeader>
       <CardContent>
         <form onSubmit={handleSubmit} className="space-y-6">
+          <div className="bg-neutral-50 dark:bg-neutral-950 p-4 rounded-xl border border-neutral-100 dark:border-neutral-800 flex items-center mb-4">
+            <div className="w-10 h-10 rounded-full bg-neutral-200 dark:bg-neutral-800 flex items-center justify-center mr-3 font-bold text-neutral-600 dark:text-neutral-400">
+               {user.email?.[0].toUpperCase()}
+            </div>
+            <div className="flex-1">
+               <p className="text-xs font-bold text-neutral-400 uppercase">Logged in as</p>
+               <p className="text-sm font-medium">{user.email}</p>
+            </div>
+          </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="space-y-2">
               <Label htmlFor="name">{t.firstName}</Label>
@@ -246,16 +594,6 @@ function RegistrationForm({ onSubmit, t, lang }: { onSubmit: (data: UserProfile)
                 onChange={e => setFormData({ ...formData, surname: e.target.value })} 
               />
             </div>
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="email">{t.email}</Label>
-            <Input 
-              id="email" 
-              type="email" 
-              placeholder="john.doe@example.com" 
-              value={formData.email} 
-              onChange={e => setFormData({ ...formData, email: e.target.value })} 
-            />
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="space-y-2">
@@ -572,15 +910,15 @@ function ScheduleWizard({
                               value={s.name} 
                               onChange={e => updateSubject(g.grade, idx, { name: e.target.value })}
                             />
-                            <div className="flex items-center space-x-2 w-24">
+                            <div className="flex items-center space-x-2 w-36">
                               <Input 
                                 type="number" 
                                 placeholder={t.hrs} 
-                                className="h-8 text-sm" 
+                                className="h-8 text-sm w-16" 
                                 value={s.hoursPerWeek} 
                                 onChange={e => updateSubject(g.grade, idx, { hoursPerWeek: parseInt(e.target.value) || 1 })}
                               />
-                              <span className="text-[10px] text-neutral-400 font-medium">{t.hrsPerWeek}</span>
+                              <span className="text-[10px] text-neutral-400 font-medium shrink-0">{t.hrsPerWeek}</span>
                             </div>
                             <Button variant="ghost" size="icon" onClick={() => removeSubject(g.grade, idx)} className="h-8 w-8 text-neutral-400 hover:text-red-500">
                               <Trash2 className="w-3 h-3" />

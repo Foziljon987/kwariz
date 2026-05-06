@@ -1,4 +1,5 @@
 export interface UserProfile {
+  id: string; // Firebase UID
   name: string;
   surname: string;
   email: string;
@@ -6,6 +7,9 @@ export interface UserProfile {
   country: string;
   region: string;
   jobTitle: string;
+  role: 'admin' | 'user';
+  paymentStatus: 'pending' | 'paid' | 'unlimited';
+  createdAt: number;
 }
 
 export interface Subject {
