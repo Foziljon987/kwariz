@@ -81,6 +81,7 @@ export const translations = {
     passwordPlaceholder: "••••••••",
     or: "OR",
     signInWithEmail: "Sign in with Email",
+    signInWithGoogle: "Sign in with Google",
     diagnostic: "Diagnostic",
     subjects: {
       math: "Mathematics",
@@ -203,6 +204,7 @@ export const translations = {
     passwordPlaceholder: "••••••••",
     or: "YOKI",
     signInWithEmail: "Email orqali kirish",
+    signInWithGoogle: "Google orqali kirish",
     diagnostic: "Diagnostika",
     subjects: {
       math: "Matematika",
@@ -246,7 +248,7 @@ export const translations = {
     }
   },
   ru: {
-    title: "AI Школьное Расписание",
+    title: "AI Maktab Jadvali",
     welcome: "Добро пожаловать",
     welcomeDesc: "Пожалуйста, введите свои личные данные, чтобы начать.",
     firstName: "Имя",
@@ -325,6 +327,7 @@ export const translations = {
     passwordPlaceholder: "••••••••",
     or: "ИЛИ",
     signInWithEmail: "Войти через Email",
+    signInWithGoogle: "Войти через Google",
     diagnostic: "Диагностика",
     subjects: {
       math: "Математика",

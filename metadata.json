@@ -1,6 +1,6 @@
 {
-  "name": "AI School Scheduler",
-  "description": "An AI-powered application to create optimized school schedules for students and teachers.",
+  "name": "AI Maktab Jadvali",
+  "description": "Sun'iy intellektga asoslangan maktab dars jadvali generatori",
   "requestFramePermissions": [],
   "majorCapabilities": []
 }

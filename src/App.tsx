@@ -305,12 +305,19 @@ export default function App() {
   };
 
   const handleLogin = async () => {
+    setIsAuthLoading(true);
     try {
       await signInWithGoogle();
       toast.success("Successfully logged in!");
-    } catch (error) {
+    } catch (error: any) {
       console.error(error);
-      toast.error("Failed to login with Google.");
+      if (error.code === 'auth/popup-blocked') {
+        toast.error("Popup blocked! Please allow popups for this site.");
+      } else {
+        toast.error(`Login failed: ${error.message || "Please check your internet connection and try again."}`);
+      }
+    } finally {
+      setIsAuthLoading(false);
     }
   };
 
@@ -415,9 +422,9 @@ export default function App() {
                 <div className="w-20 h-20 bg-blue-50 dark:bg-blue-900/20 rounded-3xl flex items-center justify-center mx-auto mb-8 border border-blue-100 dark:border-blue-800 rotate-6 hover:rotate-0 transition-all duration-500">
                   <Zap className="w-10 h-10 text-blue-600 fill-blue-600" />
                 </div>
-                <CardTitle className="text-3xl font-black mb-3 tracking-tight dark:text-white uppercase leading-none">AI Scheduler</CardTitle>
+                <CardTitle className="text-3xl font-black mb-3 tracking-tight dark:text-white uppercase leading-none">{t.title}</CardTitle>
                 <CardDescription className="mb-10 text-neutral-400 font-bold uppercase tracking-widest text-[10px] leading-relaxed">
-                  Generate optimized school schedules <br /> in seconds using Gemini 1.5
+                  Sun'iy intellekt yordamida maktab dars jadvalini <br /> bir necha soniyada yarating
                 </CardDescription>
 
                 <form onSubmit={handleEmailLogin} className="space-y-4 mb-6">
@@ -462,9 +469,16 @@ export default function App() {
                   onClick={handleLogin} 
                   type="button"
                   size="lg" 
+                  disabled={isAuthLoading}
                   className="w-full h-16 bg-blue-600 hover:bg-blue-700 text-white text-xs font-black uppercase tracking-[0.2em] rounded-2xl shadow-xl shadow-blue-500/20 group transition-all"
                 >
-                  Sign in with Google <ChevronRight className="ml-2 w-4 h-4 group-hover:translate-x-1 transition-transform" />
+                  {isAuthLoading ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <>
+                      {t.signInWithGoogle} <ChevronRight className="ml-2 w-4 h-4 group-hover:translate-x-1 transition-transform" />
+                    </>
+                  )}
                 </Button>
                 <p className="mt-8 text-[10px] font-bold text-neutral-400 uppercase tracking-widest opacity-50">Enterprise Edition v2.5</p>
               </div>
