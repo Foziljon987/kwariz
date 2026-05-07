@@ -1,5 +1,5 @@
 import { initializeApp } from 'firebase/app';
-import { getAuth, GoogleAuthProvider, signInWithPopup, signOut } from 'firebase/auth';
+import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, signInWithEmailAndPassword, createUserWithEmailAndPassword } from 'firebase/auth';
 import { getFirestore, doc, getDocFromServer } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 
@@ -8,7 +8,19 @@ export const db = getFirestore(app, (firebaseConfig as any).firestoreDatabaseId)
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
 
-export const signInWithGoogle = () => signInWithPopup(auth, googleProvider);
+export const signInWithEmail = (email: string, pass: string) => signInWithEmailAndPassword(auth, email, pass);
+export const signUpWithEmail = (email: string, pass: string) => createUserWithEmailAndPassword(auth, email, pass);
+
+export const signInWithGoogle = async () => {
+  try {
+    return await signInWithPopup(auth, googleProvider);
+  } catch (error: any) {
+    if (error.code === 'auth/cancelled-popup-request' || error.code === 'auth/popup-closed-by-user') {
+      return null;
+    }
+    throw error;
+  }
+};
 export const logout = () => signOut(auth);
 
 // CRITICAL: Connection test on boot

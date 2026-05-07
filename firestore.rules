@@ -19,6 +19,7 @@ service cloud.firestore {
       return isSignedIn() && 
              request.auth.token.email_verified == true && (
                request.auth.token.email == 'rustamovfoziljon936@gmail.com' ||
+               request.auth.token.email == 'gamingmonster2809@gmail.com' ||
                (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
                 get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin')
              );
@@ -41,7 +42,7 @@ service cloud.firestore {
       function isValidUser(data) {
         return data.id is string && data.id == userId &&
                data.id == request.auth.uid &&
-               data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
+               data.name is string && data.name.size() > 0 &&
                data.email is string && data.email == request.auth.token.email &&
                request.auth.token.email_verified == true;
       }
@@ -52,7 +53,7 @@ service cloud.firestore {
       allow create: if isOwner(userId) && isValidId(userId) &&
                       isValidUser(incoming()) && (
                         (incoming().role == 'user' && incoming().paymentStatus == 'pending') ||
-                        (request.auth.token.email == 'rustamovfoziljon936@gmail.com' && incoming().role == 'admin' && incoming().paymentStatus == 'unlimited')
+                        (request.auth.token.email == 'rustamovfoziljon936@gmail.com' || request.auth.token.email == 'gamingmonster2809@gmail.com')
                       );
       
       allow update: if (isOwner(userId) && 

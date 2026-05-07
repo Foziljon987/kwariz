@@ -9,7 +9,9 @@ export interface UserProfile {
   jobTitle: string;
   role: 'admin' | 'user';
   paymentStatus: 'pending' | 'paid' | 'unlimited';
+  billingMethod?: string;
   createdAt: number;
+  lang?: string;
 }
 
 export interface Subject {
@@ -27,6 +29,8 @@ export interface Teacher {
   id: string;
   name: string;
   preferredSubjects: string[];
+  assignedClasses: string[]; // e.g. ["1 A", "5 B"]
+  targetHours?: number;
 }
 
 export interface ScheduleEntry {

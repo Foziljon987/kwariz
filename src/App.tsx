@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { UserProfile, GradeConfig, Teacher, ScheduleResult } from './types';
-import { auth, db, signInWithGoogle, logout, handleFirestoreError, OperationType } from './lib/firebase';
+import { auth, db, signInWithGoogle, logout, handleFirestoreError, OperationType, signInWithEmail, signUpWithEmail } from './lib/firebase';
 import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
 import { doc, getDoc, setDoc, collection, onSnapshot, deleteDoc, updateDoc, query, where, getDocFromServer } from 'firebase/firestore';
 import { Button } from '@/components/ui/button';
@@ -17,14 +17,68 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Toaster } from '@/components/ui/sonner';
 import { toast } from 'sonner';
 import { motion, AnimatePresence } from 'motion/react';
-import { User, School, Users, Calendar, AlertCircle, CheckCircle2, Plus, Trash2, ChevronRight, ChevronLeft, Loader2, Download, Languages, Sun, Moon } from 'lucide-react';
+import { User, School, Users, Calendar, AlertCircle, CheckCircle2, Plus, Trash2, ChevronRight, ChevronLeft, Loader2, Download, Languages, Sun, Moon, Zap, BookOpen, Clock, MapPin, LayoutGrid, List, Settings2 } from 'lucide-react';
 import { generateSchedule, suggestSubjects, suggestTeachers } from './lib/gemini';
 import { exportScheduleToExcel } from './lib/excel';
+import { getCanonicalDay, normalizeTime, isLessonMatch, validateSchedule } from './lib/formatters';
 import { COUNTRIES, COUNTRIES_REGIONS } from './constants';
 import { translations, Language } from './translations';
 
+const getSubjectColor = (subject: string) => {
+  const s = (subject || "").toLowerCase();
+  
+  // Specific color logic for common subjects
+  if (s.includes('math') || s.includes('matem') || s.includes('algebra') || s.includes('geomet')) return 'bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-900/30 dark:text-blue-400';
+  if (s.includes('science') || s.includes('fizika') || s.includes('kimyo') || s.includes('biolog') || s.includes('tabiiy') || s.includes('prirod')) return 'bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-900/30 dark:text-emerald-400';
+  if (s.includes('english') || s.includes('ona tili') || s.includes('adabiyot') || s.includes('rus tili') || s.includes('til') || s.includes('yazik')) return 'bg-purple-50 text-purple-700 border-purple-200 dark:bg-purple-900/30 dark:text-purple-400';
+  if (s.includes('history') || s.includes('tarix') || s.includes('geograph') || s.includes('geograf') || s.includes('huquq') || s.includes('istoriya')) return 'bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-900/30 dark:text-amber-400';
+  if (s.includes('art') || s.includes('music') || s.includes('tasviriy') || s.includes('musiqa') || s.includes('izo')) return 'bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-900/30 dark:text-rose-400';
+  if (s.includes('sport') || s.includes('phys') || s.includes('jismoniy') || s.includes('tarbiya') || s.includes('fizra')) return 'bg-indigo-50 text-indigo-700 border-indigo-200 dark:bg-indigo-900/30 dark:text-indigo-400';
+  if (s.includes('computer') || s.includes('tech') || s.includes('info') || s.includes('it')) return 'bg-cyan-50 text-cyan-700 border-cyan-200 dark:bg-cyan-900/30 dark:text-cyan-400';
+  
+  // Hash-based fallback for other subjects
+  const hash = subject.split('').reduce((acc, char) => char.charCodeAt(0) + ((acc << 5) - acc), 0);
+  const colors = [
+    'bg-slate-50 text-slate-700 border-slate-200 dark:bg-neutral-800 dark:text-neutral-300',
+    'bg-zinc-50 text-zinc-700 border-zinc-200 dark:bg-neutral-800 dark:text-neutral-300',
+    'bg-neutral-50 text-neutral-700 border-neutral-200 dark:bg-neutral-800 dark:text-neutral-300',
+  ];
+  return colors[Math.abs(hash) % colors.length];
+};
+
+const localizeSubject = (subject: string, t: any) => {
+  const s = (subject || "").toLowerCase();
+  const subT = t.subjects;
+  if (!subT) return subject;
+
+  if (s.includes('math') || s.includes('matem') || s.includes('algebra') || s.includes('geomet')) return subT.math;
+  if (s.includes('physics') || s.includes('fizika')) return subT.physics;
+  if (s.includes('chemistry') || s.includes('kimyo')) return subT.chemistry;
+  if (s.includes('biology') || s.includes('biolog')) return subT.biology;
+  if (s.includes('history') || s.includes('tarix') || s.includes('istoriya')) return subT.history;
+  if (s.includes('geograph') || s.includes('geograf')) return subT.geography;
+  if (s.includes('english') || s.includes('ingliz')) return subT.english;
+  if (s.includes('uzbek') || s.includes('o\'zbek')) return subT.uzbek;
+  if (s.includes('russian') || s.includes('rus')) return subT.russian;
+  if (s.includes('literature') || s.includes('adabiyot')) return subT.literature;
+  if (s.includes('art') || s.includes('tasviriy') || s.includes('izo')) return subT.art;
+  if (s.includes('music') || s.includes('musiqa')) return subT.music;
+  if (s.includes('sport') || s.includes('phys') || s.includes('jismoniy') || s.includes('fizra')) return subT.sport;
+  if (s.includes('it') || s.includes('computer') || s.includes('informatika')) return subT.it;
+  if (s.includes('technology') || s.includes('texnologiya')) return subT.technology;
+  if (s.includes('mother') || s.includes('ona tili')) return subT.mother_tongue;
+  if (s.includes('science') || s.includes('tabiiy') || s.includes('prirod')) return subT.science;
+
+  return subject;
+};
+
 export default function App() {
-  const [lang, setLang] = useState<Language>('en');
+  const [lang, setLang] = useState<Language>(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('lang') as Language || 'en';
+    }
+    return 'en';
+  });
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     if (typeof window !== 'undefined') {
       return localStorage.getItem('theme') as 'light' | 'dark' || 'light';
@@ -35,12 +89,26 @@ export default function App() {
   const [user, setUser] = useState<FirebaseUser | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [subscribers, setSubscribers] = useState<UserProfile[]>([]);
-  const [step, setStep] = useState<'register' | 'profile' | 'config' | 'result' | 'admin' | 'payment'>('register');
+  const [step, setStep] = useState<'register' | 'profile' | 'config' | 'result' | 'admin'>('register');
   const [grades, setGrades] = useState<GradeConfig[]>([]);
   const [teachers, setTeachers] = useState<Teacher[]>([]);
   const [scheduleResult, setScheduleResult] = useState<ScheduleResult | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSuggesting, setIsSuggesting] = useState(false);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [isAuthLoading, setIsAuthLoading] = useState(false);
+
+  useEffect(() => {
+    localStorage.setItem('lang', lang);
+    if (user && profile && profile.lang !== lang) {
+      updateDoc(doc(db, 'users', user.uid), { lang }).catch(err => {
+        if (err instanceof Error && err.message.includes('permission-denied')) {
+          console.warn('Silent failure updating language - rules might be strictly schema bound');
+        }
+      });
+    }
+  }, [lang, user, profile]);
 
   useEffect(() => {
     const root = window.document.documentElement;
@@ -61,8 +129,6 @@ export default function App() {
             setProfile(userData);
             if (userData.role === 'admin') {
               setStep('admin');
-            } else if (userData.paymentStatus === 'pending') {
-              setStep('payment');
             } else {
               setStep('profile');
             }
@@ -109,8 +175,9 @@ export default function App() {
       id: user.uid,
       email: user.email!,
       role: user.email === 'rustamovfoziljon936@gmail.com' ? 'admin' : 'user',
-      paymentStatus: user.email === 'rustamovfoziljon936@gmail.com' ? 'unlimited' : 'pending',
-      createdAt: Date.now()
+      paymentStatus: 'unlimited',
+      createdAt: Date.now(),
+      lang: lang
     };
     try {
       await setDoc(doc(db, 'users', user.uid), newProfile);
@@ -118,24 +185,10 @@ export default function App() {
       if (newProfile.role === 'admin') {
         setStep('admin');
       } else {
-        setStep('payment');
+        setStep('profile');
       }
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, path);
-    }
-  };
-
-  const handlePaymentSuccess = async () => {
-    if (!user || !profile) return;
-    const path = `users/${user.uid}`;
-    const updatedProfile = { ...profile, paymentStatus: 'paid' as const };
-    try {
-      await updateDoc(doc(db, 'users', user.uid), { paymentStatus: 'paid' });
-      setProfile(updatedProfile);
-      setStep('profile');
-      toast.success("Payment confirmed! You can now generate schedules.");
-    } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, path);
     }
   };
 
@@ -161,21 +214,57 @@ export default function App() {
     }
     if (!profile) return;
     
-    if (profile.role !== 'admin' && profile.paymentStatus !== 'paid' && profile.paymentStatus !== 'unlimited') {
-      setStep('payment');
-      toast.error("Please complete payment to generate schedules.");
-      return;
-    }
-    
     setIsLoading(true);
     try {
-      const result = await generateSchedule(grades, teachers, profile.country, profile.region, lang);
+      // Deduplicate grades before sending to AI to ensure consistent coverage
+      const uniqueGradesMap = new Map<number, GradeConfig>();
+      grades.forEach(g => {
+        if (!uniqueGradesMap.has(g.grade)) {
+          uniqueGradesMap.set(g.grade, g);
+        } else {
+          // Merge subjects and take max numClasses
+          const existing = uniqueGradesMap.get(g.grade)!;
+          const mergedSubjects = [...existing.subjects];
+          g.subjects.forEach(s => {
+            if (!mergedSubjects.find(ms => ms.name.toLowerCase() === s.name.toLowerCase())) {
+              mergedSubjects.push(s);
+            }
+          });
+          uniqueGradesMap.set(g.grade, {
+            ...existing,
+            numClasses: Math.max(existing.numClasses, g.numClasses),
+            subjects: mergedSubjects
+          });
+        }
+      });
+      const processedGrades = Array.from(uniqueGradesMap.values());
+
+      const result = await generateSchedule(processedGrades, teachers, profile.country, profile.region, lang);
+      
+      if (!result || !result.schedule || result.schedule.length === 0) {
+        throw new Error("AI generated an empty schedule. This might be due to complex constraints. Please try simplifying your grades or teachers.");
+      }
+
+      if (!validateSchedule(result.schedule)) {
+        throw new Error("AI generated an invalid schedule format. Retrying recommended.");
+      }
+
+      // Recalculate stats locally
+      const teacherHours: Record<string, number> = {};
+      const gradeHours: Record<number, number> = {};
+      result.schedule.forEach(entry => {
+        teacherHours[entry.teacher] = (teacherHours[entry.teacher] || 0) + 1;
+        gradeHours[entry.grade] = (gradeHours[entry.grade] || 0) + 1;
+      });
+      result.stats = { teacherHours, gradeHours };
+
       setScheduleResult(result);
       setStep('result');
       toast.success(t.genSuccess);
-    } catch (error) {
-      console.error(error);
-      toast.error(t.genError);
+    } catch (error: any) {
+      console.error("Schedule generation error:", error);
+      const msg = error.message || "Unknown error occurred";
+      toast.error(`${t.genError}: ${msg.substring(0, 100)}`);
     } finally {
       setIsLoading(false);
     }
@@ -206,12 +295,8 @@ export default function App() {
   const handleReset = () => {
     if (profile?.role === 'admin') {
         setStep('admin');
-    } else if (profile?.paymentStatus === 'paid') {
-        setStep('profile');
-    } else if (profile?.paymentStatus === 'pending') {
-        setStep('payment');
     } else {
-        setStep('register');
+        setStep('profile');
     }
     setGrades([]);
     setTeachers([]);
@@ -229,6 +314,29 @@ export default function App() {
     }
   };
 
+  const handleEmailLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!email || !password) return;
+    setIsAuthLoading(true);
+    try {
+      await signInWithEmail(email, password);
+      toast.success("Successfully logged in!");
+    } catch (err: any) {
+      if (err.code === 'auth/user-not-found' || err.code === 'auth/invalid-credential') {
+        try {
+          await signUpWithEmail(email, password);
+          toast.success("Account created successfully!");
+        } catch (signUpErr: any) {
+          toast.error(signUpErr.message);
+        }
+      } else {
+        toast.error(err.message);
+      }
+    } finally {
+      setIsAuthLoading(false);
+    }
+  };
+
   if (isLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-neutral-50 dark:bg-neutral-950">
@@ -238,31 +346,38 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-neutral-50 dark:bg-neutral-950 font-sans text-neutral-900 dark:text-neutral-50">
+    <div className="min-h-screen bg-slate-50 dark:bg-neutral-950 font-sans text-neutral-900 dark:text-neutral-50 selection:bg-blue-100 selection:text-blue-900">
       <div className="max-w-5xl mx-auto py-12 px-4">
-        <div className="flex justify-between items-center mb-8">
-          <div className="flex items-center space-x-3">
-            <div className="w-10 h-10 bg-neutral-900 rounded-lg flex items-center justify-center">
-              <Calendar className="text-white w-6 h-6" />
-            </div>
-            <h1 className="text-xl font-bold tracking-tight">{t.title}</h1>
-          </div>
+        <motion.div 
+          initial={{ opacity: 0, y: -20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="flex justify-between items-center mb-12"
+        >
           <div className="flex items-center space-x-4">
+            <div className="w-12 h-12 bg-blue-600 rounded-2xl flex items-center justify-center shadow-lg shadow-blue-200 dark:shadow-none rotate-3 hover:rotate-0 transition-transform">
+              <Calendar className="w-6 h-6 text-white" />
+            </div>
+            <div>
+              <h1 className="text-2xl font-black tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-neutral-900 to-neutral-500 dark:from-white dark:to-neutral-500 uppercase">{t.title}</h1>
+              <p className="text-[10px] font-black text-blue-600/60 dark:text-blue-400/60 uppercase tracking-[0.2em]">Scheduling Engine v2.5 • Enterprise</p>
+            </div>
+          </div>
+          <div className="flex items-center space-x-3">
             <Button
               variant="ghost"
               size="icon"
               onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
-              className="rounded-full w-9 h-9 text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800"
+              className="rounded-2xl w-10 h-10 border border-neutral-200 dark:border-neutral-800 bg-white/50 dark:bg-neutral-900/50 backdrop-blur-sm transition-all hover:scale-105 active:scale-95"
             >
-              {theme === 'light' ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
+              {theme === 'light' ? <Moon className="w-5 h-5 text-neutral-600" /> : <Sun className="w-5 h-5 text-yellow-400" />}
             </Button>
-            <div className="flex items-center bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-full px-2 py-1 shadow-sm">
-              <Languages className="w-4 h-4 text-neutral-400 mr-2 ml-1" />
+            <div className="flex items-center bg-white/50 dark:bg-neutral-900/50 backdrop-blur-sm border border-neutral-200 dark:border-neutral-800 rounded-2xl px-3 py-1 shadow-sm">
+              <Languages className="w-4 h-4 text-neutral-400 mr-2" />
               <Select value={lang} onValueChange={(v: Language) => setLang(v)}>
-                <SelectTrigger className="border-none shadow-none h-7 bg-transparent focus:ring-0 text-xs w-24">
+                <SelectTrigger className="border-none shadow-none h-8 bg-transparent focus:ring-0 text-[10px] font-black uppercase tracking-widest w-24">
                   <SelectValue />
                 </SelectTrigger>
-                <SelectContent>
+                <SelectContent className="rounded-xl border-neutral-100 dark:border-neutral-800">
                   <SelectItem value="en">English</SelectItem>
                   <SelectItem value="uz">O'zbek</SelectItem>
                   <SelectItem value="ru">Русский</SelectItem>
@@ -270,8 +385,13 @@ export default function App() {
               </Select>
             </div>
             {user && (
-              <Button variant="ghost" size="sm" onClick={() => logout()} className="text-neutral-500 hover:text-red-500 rounded-full">
-                Logout
+              <Button 
+                variant="ghost" 
+                size="sm" 
+                onClick={() => logout()} 
+                className="text-neutral-400 hover:text-red-500 font-bold uppercase text-[10px] tracking-widest px-4 h-10 rounded-2xl"
+              >
+                Sign Out
               </Button>
             )}
             {profile && scheduleResult && (
@@ -285,19 +405,69 @@ export default function App() {
               </Button>
             )}
           </div>
-        </div>
+        </motion.div>
         
         {!user ? (
-          <div className="flex flex-col items-center justify-center h-[60vh] space-y-6">
-            <Card className="w-full max-w-md border-none shadow-xl text-center p-8">
-              <div className="w-16 h-16 bg-neutral-100 rounded-2xl flex items-center justify-center mx-auto mb-6">
-                <Calendar className="w-8 h-8 text-neutral-900" />
+          <div className="flex flex-col items-center justify-center min-h-[70vh] space-y-8">
+            <Card className="w-full max-w-sm border-none shadow-2xl dark:shadow-blue-900/10 dark:bg-neutral-900 rounded-[2.5rem] overflow-hidden p-0 animate-in fade-in slide-in-from-bottom-8 duration-700">
+              <div className="h-3 w-full bg-gradient-to-r from-blue-600 via-indigo-600 to-violet-600" />
+              <div className="p-10 text-center">
+                <div className="w-20 h-20 bg-blue-50 dark:bg-blue-900/20 rounded-3xl flex items-center justify-center mx-auto mb-8 border border-blue-100 dark:border-blue-800 rotate-6 hover:rotate-0 transition-all duration-500">
+                  <Zap className="w-10 h-10 text-blue-600 fill-blue-600" />
+                </div>
+                <CardTitle className="text-3xl font-black mb-3 tracking-tight dark:text-white uppercase leading-none">AI Scheduler</CardTitle>
+                <CardDescription className="mb-10 text-neutral-400 font-bold uppercase tracking-widest text-[10px] leading-relaxed">
+                  Generate optimized school schedules <br /> in seconds using Gemini 1.5
+                </CardDescription>
+
+                <form onSubmit={handleEmailLogin} className="space-y-4 mb-6">
+                  <div className="space-y-2 text-left">
+                    <Label className="text-[10px] font-black uppercase tracking-widest text-neutral-400 ml-1">{t.email}</Label>
+                    <Input 
+                      type="email" 
+                      placeholder={t.emailPlaceholder}
+                      value={email}
+                      onChange={(e) => setEmail(e.target.value)}
+                      className="h-12 rounded-2xl bg-neutral-50 dark:bg-neutral-800 border-neutral-100 dark:border-neutral-700 font-bold text-sm"
+                      required
+                    />
+                  </div>
+                  <div className="space-y-2 text-left">
+                    <Label className="text-[10px] font-black uppercase tracking-widest text-neutral-400 ml-1">{t.password}</Label>
+                    <Input 
+                      type="password" 
+                      placeholder={t.passwordPlaceholder}
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      className="h-12 rounded-2xl bg-neutral-50 dark:bg-neutral-800 border-neutral-100 dark:border-neutral-700 font-bold text-sm"
+                      required
+                    />
+                  </div>
+                  <Button 
+                    type="submit"
+                    disabled={isAuthLoading}
+                    className="w-full h-14 bg-neutral-900 dark:bg-white dark:text-neutral-900 hover:bg-neutral-800 dark:hover:bg-neutral-200 text-[10px] font-black uppercase tracking-[0.2em] rounded-2xl transition-all"
+                  >
+                    {isAuthLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : t.signInWithEmail}
+                  </Button>
+                </form>
+
+                <div className="flex items-center space-x-4 mb-6">
+                  <div className="h-px bg-neutral-100 dark:bg-neutral-800 flex-1" />
+                  <span className="text-[10px] font-black text-neutral-300 uppercase tracking-widest">{t.or}</span>
+                  <div className="h-px bg-neutral-100 dark:bg-neutral-800 flex-1" />
+                </div>
+
+                <Button 
+                  onClick={handleLogin} 
+                  type="button"
+                  size="lg" 
+                  className="w-full h-16 bg-blue-600 hover:bg-blue-700 text-white text-xs font-black uppercase tracking-[0.2em] rounded-2xl shadow-xl shadow-blue-500/20 group transition-all"
+                >
+                  Sign in with Google <ChevronRight className="ml-2 w-4 h-4 group-hover:translate-x-1 transition-transform" />
+                </Button>
+                <p className="mt-8 text-[10px] font-bold text-neutral-400 uppercase tracking-widest opacity-50">Enterprise Edition v2.5</p>
               </div>
-              <CardTitle className="text-2xl font-bold mb-2">School Scheduling AI</CardTitle>
-              <CardDescription className="mb-8">Sign in to start creating optimized school timetables in minutes.</CardDescription>
-              <Button onClick={handleLogin} size="lg" className="w-full h-14 bg-neutral-900 hover:bg-neutral-800 text-lg">
-                Sign in with Google
-              </Button>
             </Card>
           </div>
         ) : (
@@ -313,17 +483,6 @@ export default function App() {
               </motion.div>
             )}
 
-            {step === 'payment' && profile && (
-               <motion.div
-                key="payment"
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -20 }}
-              >
-                <PaymentRequired onConfirm={handlePaymentSuccess} t={t} />
-              </motion.div>
-            )}
-
             {step === 'admin' && profile?.role === 'admin' && (
                <motion.div
                 key="admin"
@@ -335,6 +494,7 @@ export default function App() {
                   subscribers={subscribers} 
                   onDeleteUser={handleDeleteUser} 
                   onStartScheduling={() => setStep('profile')}
+                  profile={profile}
                   t={t} 
                 />
               </motion.div>
@@ -387,6 +547,7 @@ export default function App() {
                   onUpdateSchedule={handleUpdateSchedule}
                   allTeachers={teachers}
                   allGrades={grades}
+                  profile={profile}
                   t={t}
                   lang={lang}
                 />
@@ -400,88 +561,89 @@ export default function App() {
   );
 }
 
-function AdminDashboard({ subscribers, onDeleteUser, onStartScheduling, t }: { subscribers: UserProfile[], onDeleteUser: (id: string) => void, onStartScheduling: () => void, t: any }) {
+function AdminDashboard({ 
+  subscribers, 
+  onDeleteUser, 
+  onStartScheduling, 
+  profile,
+  t 
+}: { 
+  subscribers: UserProfile[], 
+  onDeleteUser: (id: string) => void, 
+  onStartScheduling: () => void,
+  profile: UserProfile,
+  t: any 
+}) {
   return (
     <div className="space-y-6 text-neutral-900 dark:text-neutral-100">
-      <div className="flex justify-between items-center bg-white dark:bg-neutral-900 p-6 rounded-2xl shadow-sm border border-neutral-200 dark:border-neutral-800">
+      <div className="flex justify-between items-center bg-white dark:bg-neutral-900/80 backdrop-blur-xl p-6 rounded-2xl shadow-sm border border-neutral-200 dark:border-neutral-800">
         <div>
-          <h2 className="text-2xl font-bold">Admin Panel</h2>
-          <p className="text-neutral-500">Manage subscribers and system settings</p>
+          <h2 className="text-2xl font-bold tracking-tight">Admin Panel</h2>
+          <p className="text-neutral-500 font-medium text-sm">Manage subscribers and system settings</p>
         </div>
-        <Button onClick={onStartScheduling} className="rounded-full bg-neutral-900">
+        <Button onClick={onStartScheduling} className="rounded-xl bg-blue-600 hover:bg-blue-700 font-bold uppercase tracking-widest text-xs px-6 h-11">
           Open Scheduler <ChevronRight className="ml-2 w-4 h-4" />
         </Button>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <Card className="border-none shadow-sm dark:bg-neutral-900">
+        <Card className="border-none shadow-sm dark:bg-neutral-900/50 backdrop-blur-md">
           <CardHeader className="pb-2">
-            <CardDescription className="uppercase tracking-wider text-[10px] font-bold">Total Subscribers</CardDescription>
-            <CardTitle className="text-3xl font-black">{subscribers.length}</CardTitle>
+            <CardDescription className="uppercase tracking-wider text-[10px] font-black text-neutral-400">Total Subscribers</CardDescription>
+            <CardTitle className="text-3xl font-black text-neutral-900 dark:text-white">{subscribers.length}</CardTitle>
           </CardHeader>
         </Card>
-        <Card className="border-none shadow-sm dark:bg-neutral-900">
+        <Card className="border-none shadow-sm dark:bg-neutral-900/50 backdrop-blur-md">
           <CardHeader className="pb-2">
-            <CardDescription className="uppercase tracking-wider text-[10px] font-bold">System Status</CardDescription>
-            <CardTitle className="text-3xl font-black text-green-500 underline underline-offset-8">Active</CardTitle>
-          </CardHeader>
-        </Card>
-        <Card className="border-none shadow-sm bg-neutral-900 text-white dark:bg-neutral-50 dark:text-neutral-900">
-          <CardHeader className="pb-2">
-            <CardDescription className="uppercase tracking-wider text-[10px] font-bold text-neutral-400 dark:text-neutral-500">Current Billing Method</CardDescription>
-            <CardTitle className="text-lg font-bold">UZCARD **** 4590</CardTitle>
-            <Button variant="outline" size="sm" className="mt-2 text-neutral-900 dark:text-neutral-50 border-white dark:border-neutral-800 hover:bg-white/10 dark:hover:bg-neutral-800">Change Card</Button>
+            <CardDescription className="uppercase tracking-wider text-[10px] font-black text-neutral-400">System Status</CardDescription>
+            <CardTitle className="text-3xl font-black text-emerald-500 flex items-center">
+              Active <CheckCircle2 className="ml-2 w-6 h-6" />
+            </CardTitle>
           </CardHeader>
         </Card>
       </div>
 
-      <Card className="border-none shadow-sm">
-        <CardHeader>
+      <Card className="border-none shadow-sm dark:bg-neutral-900/50 backdrop-blur-md overflow-hidden">
+        <CardHeader className="border-b border-neutral-100 dark:border-neutral-800 bg-white/50 dark:bg-neutral-900/50">
           <CardTitle>Subscriber List</CardTitle>
           <CardDescription>View and manage all registered users</CardDescription>
         </CardHeader>
-        <CardContent>
+        <CardContent className="p-0">
           <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>User</TableHead>
-                <TableHead>Location</TableHead>
-                <TableHead>Role</TableHead>
-                <TableHead>Payment</TableHead>
-                <TableHead className="text-right">Actions</TableHead>
+            <TableHeader className="bg-neutral-50 dark:bg-neutral-950">
+              <TableRow className="border-neutral-100 dark:border-neutral-800">
+                <TableHead className="py-4 px-6 text-[10px] font-black uppercase tracking-widest text-neutral-400">User</TableHead>
+                <TableHead className="py-4 text-[10px] font-black uppercase tracking-widest text-neutral-400">Location</TableHead>
+                <TableHead className="py-4 text-[10px] font-black uppercase tracking-widest text-neutral-400">Role</TableHead>
+                <TableHead className="py-4 px-6 text-right text-[10px] font-black uppercase tracking-widest text-neutral-400">Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {subscribers.map((u) => (
-                <TableRow key={u.id}>
-                  <TableCell className="font-medium">
+                <TableRow key={u.id} className="border-neutral-100 dark:border-neutral-800 hover:bg-neutral-50/50 dark:hover:bg-neutral-800/30 transition-colors">
+                  <TableCell className="py-4 px-6">
                     <div className="flex items-center space-x-3">
-                      <div className="w-8 h-8 rounded-full bg-neutral-100 flex items-center justify-center text-[10px]">
+                      <div className="w-10 h-10 rounded-xl bg-neutral-100 dark:bg-neutral-800 flex items-center justify-center text-xs font-black text-neutral-500 border border-neutral-200 dark:border-neutral-700">
                         {u.name[0]}{u.surname[0]}
                       </div>
                       <div>
-                        {u.name} {u.surname}
-                        <p className="text-xs text-neutral-400 font-normal">{u.email}</p>
+                        <p className="font-bold text-sm">{u.name} {u.surname}</p>
+                        <p className="text-[11px] text-neutral-400 font-bold uppercase tracking-tight">{u.email}</p>
                       </div>
                     </div>
                   </TableCell>
-                  <TableCell className="text-xs text-neutral-500">{u.region}, {u.country}</TableCell>
+                  <TableCell className="text-xs text-neutral-500 font-medium">{u.region}, {u.country}</TableCell>
                   <TableCell>
-                    <Badge variant={u.role === 'admin' ? 'default' : 'outline'} className="text-[10px] uppercase">
+                    <Badge variant={u.role === 'admin' ? 'default' : 'outline'} className="text-[9px] uppercase font-black tracking-widest px-2 py-0.5">
                       {u.role}
                     </Badge>
                   </TableCell>
-                  <TableCell>
-                    <Badge variant={u.paymentStatus === 'paid' || u.paymentStatus === 'unlimited' ? 'secondary' : 'destructive'} className="text-[10px] uppercase">
-                      {u.paymentStatus}
-                    </Badge>
-                  </TableCell>
-                  <TableCell className="text-right">
+                  <TableCell className="py-4 px-6 text-right">
                     <Button 
                       variant="ghost" 
                       size="icon" 
                       onClick={() => onDeleteUser(u.id)}
-                      className="text-neutral-400 hover:text-red-500"
+                      className="text-neutral-300 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition-all rounded-lg"
                       disabled={u.role === 'admin'}
                     >
                       <Trash2 className="w-4 h-4" />
@@ -494,46 +656,6 @@ function AdminDashboard({ subscribers, onDeleteUser, onStartScheduling, t }: { s
         </CardContent>
       </Card>
     </div>
-  );
-}
-
-function PaymentRequired({ onConfirm, t }: { onConfirm: () => void, t: any }) {
-  return (
-    <Card className="max-w-2xl mx-auto border-none shadow-xl overflow-hidden">
-      <div className="bg-neutral-900 p-8 text-center text-white">
-        <div className="w-16 h-16 bg-white/10 rounded-full flex items-center justify-center mx-auto mb-4 backdrop-blur-sm">
-          <Calendar className="w-8 h-8" />
-        </div>
-        <h2 className="text-3xl font-bold mb-2">Registration Succeeded</h2>
-        <p className="text-neutral-400">One more step to unlock the AI School Scheduler</p>
-      </div>
-      <CardHeader className="text-center pb-0 pt-8">
-        <div className="space-y-1">
-          <CardTitle className="text-4xl font-black">10,000 UZS</CardTitle>
-          <CardDescription className="text-sm font-medium text-neutral-500">Service Activation Fee</CardDescription>
-        </div>
-      </CardHeader>
-      <CardContent className="p-8 space-y-6">
-        <div className="bg-neutral-50 dark:bg-neutral-900 rounded-2xl p-6 border border-neutral-100 dark:border-neutral-800 space-y-4">
-          <div className="flex justify-between items-center text-sm">
-            <span className="text-neutral-500">Beneficiary Card</span>
-            <span className="font-mono font-bold">8600 0000 0000 0000</span>
-          </div>
-          <div className="flex justify-between items-center text-sm">
-            <span className="text-neutral-500">Recipient Name</span>
-            <span className="font-bold">Admin Foziljon</span>
-          </div>
-          <Separator className="dark:bg-neutral-800" />
-          <p className="text-xs text-center text-neutral-400">
-            Please transfer the exact amount and wait for confirmation. 
-            For demonstration purposes, click the button below after payment.
-          </p>
-        </div>
-        <Button onClick={onConfirm} size="lg" className="w-full h-14 bg-neutral-900 dark:bg-neutral-50 dark:text-neutral-900 hover:bg-neutral-800 dark:hover:bg-neutral-200 text-lg font-bold">
-          Confirm Payment
-        </Button>
-      </CardContent>
-    </Card>
   );
 }
 
@@ -559,20 +681,20 @@ function RegistrationForm({ user, onSubmit, t, lang }: { user: any, onSubmit: (d
   };
 
   return (
-    <Card className="border-none shadow-xl shadow-neutral-200/50 dark:bg-neutral-900 dark:shadow-none">
-      <CardHeader className="space-y-1 pb-8">
-        <CardTitle className="text-3xl font-bold tracking-tight">{t.welcome}</CardTitle>
-        <CardDescription className="text-neutral-500">{t.welcomeDesc}</CardDescription>
+    <Card className="border-none shadow-xl shadow-neutral-200/50 dark:bg-neutral-900 dark:shadow-none rounded-[2rem] overflow-hidden">
+      <CardHeader className="space-y-1 pb-8 bg-neutral-50/50 dark:bg-neutral-950/50 border-b border-neutral-100 dark:border-neutral-800">
+        <CardTitle className="text-3xl font-black tracking-tight dark:text-white uppercase">{t.welcome}</CardTitle>
+        <CardDescription className="text-neutral-500 font-bold text-xs uppercase tracking-widest">{t.welcomeDesc}</CardDescription>
       </CardHeader>
-      <CardContent>
+      <CardContent className="pt-8">
         <form onSubmit={handleSubmit} className="space-y-6">
-          <div className="bg-neutral-50 dark:bg-neutral-950 p-4 rounded-xl border border-neutral-100 dark:border-neutral-800 flex items-center mb-4">
-            <div className="w-10 h-10 rounded-full bg-neutral-200 dark:bg-neutral-800 flex items-center justify-center mr-3 font-bold text-neutral-600 dark:text-neutral-400">
+          <div className="bg-neutral-50 dark:bg-neutral-950 p-4 rounded-2xl border border-neutral-100 dark:border-neutral-800 flex items-center mb-6">
+            <div className="w-12 h-12 rounded-xl bg-white dark:bg-neutral-900 border border-neutral-100 dark:border-neutral-800 flex items-center justify-center mr-4 font-black text-blue-600 dark:text-blue-400 shadow-sm">
                {user.email?.[0].toUpperCase()}
             </div>
-            <div className="flex-1">
-               <p className="text-xs font-bold text-neutral-400 uppercase">Logged in as</p>
-               <p className="text-sm font-medium">{user.email}</p>
+            <div className="flex-1 text-left">
+               <p className="text-[10px] font-black text-neutral-400 uppercase tracking-widest">Logged in as</p>
+               <p className="text-sm font-bold tracking-tight text-neutral-600 dark:text-neutral-300">{user.email}</p>
             </div>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -664,19 +786,19 @@ function RegistrationForm({ user, onSubmit, t, lang }: { user: any, onSubmit: (d
 
 function ProfileView({ profile, onStart, t }: { profile: UserProfile, onStart: () => void, t: any }) {
   return (
-    <Card className="border-none shadow-xl shadow-neutral-200/50 overflow-hidden">
-      <div className="h-32 bg-neutral-900 relative">
-        <div className="absolute -bottom-12 left-8 w-24 h-24 bg-white rounded-2xl shadow-lg flex items-center justify-center border-4 border-white overflow-hidden">
-          <User className="w-12 h-12 text-neutral-900" />
+    <Card className="border-none shadow-xl shadow-neutral-200/50 dark:bg-neutral-900 dark:shadow-none overflow-hidden rounded-[2rem]">
+      <div className="h-32 bg-blue-600 dark:bg-blue-900 relative">
+        <div className="absolute -bottom-10 left-8 w-24 h-24 bg-white dark:bg-neutral-800 rounded-3xl shadow-xl flex items-center justify-center border-4 border-white dark:border-neutral-800 overflow-hidden rotate-6">
+          <User className="w-12 h-12 text-blue-600 dark:text-blue-400" />
         </div>
       </div>
-      <CardHeader className="pt-16 pb-8">
+      <CardHeader className="pt-16 pb-8 border-b border-neutral-100 dark:border-neutral-800">
         <div className="flex justify-between items-start">
           <div className="space-y-1">
-            <CardTitle className="text-3xl font-bold tracking-tight">{profile.name} {profile.surname}</CardTitle>
-            <CardDescription className="text-neutral-500">{profile.email}</CardDescription>
+            <CardTitle className="text-3xl font-black tracking-tight dark:text-white uppercase leading-none">{profile.name} {profile.surname}</CardTitle>
+            <CardDescription className="text-neutral-500 font-bold text-xs uppercase tracking-widest mt-2">{profile.email}</CardDescription>
           </div>
-          <Badge variant="outline" className="px-3 py-1 text-sm font-medium border-neutral-200 bg-neutral-50 text-neutral-600">
+          <Badge variant="outline" className="px-3 py-1 text-[10px] uppercase font-black tracking-widest border-blue-100 dark:border-blue-900/40 bg-blue-50/50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400">
             {profile.jobTitle === 'Teacher' ? t.jobs.teacher : 
              profile.jobTitle === 'Director' ? t.jobs.director :
              profile.jobTitle === 'Vice principal' ? t.jobs.vicePrincipal :
@@ -685,30 +807,31 @@ function ProfileView({ profile, onStart, t }: { profile: UserProfile, onStart: (
           </Badge>
         </div>
       </CardHeader>
-      <CardContent className="space-y-8">
-        <div className="grid grid-cols-2 md:grid-cols-3 gap-6">
-          <div className="space-y-1">
-            <p className="text-xs font-semibold uppercase tracking-wider text-neutral-400">{t.sex}</p>
-            <p className="text-neutral-900 font-medium capitalize">
+      <CardContent className="space-y-10 pt-10">
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-8 text-left">
+          <div className="space-y-2">
+            <p className="text-[10px] font-black uppercase tracking-widest text-neutral-400">{t.sex}</p>
+            <p className="text-neutral-900 dark:text-neutral-100 font-bold capitalize">
               {profile.sex === 'male' ? t.genders.male : 
                profile.sex === 'female' ? t.genders.female : t.genders.other}
             </p>
           </div>
-          <div className="space-y-1">
-            <p className="text-xs font-semibold uppercase tracking-wider text-neutral-400">{t.country}</p>
-            <p className="text-neutral-900 font-medium">{profile.country}</p>
+          <div className="space-y-2">
+            <p className="text-[10px] font-black uppercase tracking-widest text-neutral-400">{t.country}</p>
+            <p className="text-neutral-900 dark:text-neutral-100 font-bold">{profile.country}</p>
           </div>
-          <div className="space-y-1">
-            <p className="text-xs font-semibold uppercase tracking-wider text-neutral-400">{t.region}</p>
-            <p className="text-neutral-900 font-medium">{profile.region}</p>
+          <div className="space-y-2">
+            <p className="text-[10px] font-black uppercase tracking-widest text-neutral-400">{t.region}</p>
+            <p className="text-neutral-900 dark:text-neutral-100 font-bold">{profile.region}</p>
           </div>
         </div>
-        <Separator className="bg-neutral-100" />
-        <div className="flex flex-col items-center space-y-4">
-          <p className="text-center text-neutral-500 max-w-md">
+        
+        <Separator className="bg-neutral-100 dark:bg-neutral-800" />
+        <div className="flex flex-col items-center space-y-6">
+          <p className="text-center text-neutral-400 font-bold text-xs uppercase tracking-widest leading-relaxed max-w-sm">
             {t.profileReady}
           </p>
-          <Button onClick={onStart} size="lg" className="px-12 h-14 text-lg font-medium bg-neutral-900 hover:bg-neutral-800 transition-all rounded-full">
+          <Button onClick={onStart} size="lg" className="w-full h-16 bg-blue-600 hover:bg-blue-700 text-white font-black uppercase tracking-[0.2em] rounded-2xl shadow-xl shadow-blue-500/20 text-xs transition-all hover:scale-[1.02] active:scale-95">
             {t.startScheduling} <ChevronRight className="ml-2 w-5 h-5" />
           </Button>
         </div>
@@ -764,18 +887,15 @@ function ScheduleWizard({
   };
 
   const handleSuggestTeachers = async () => {
-    const allSubjects = Array.from(new Set(grades.flatMap(g => g.subjects.map(s => s.name))));
-    const totalClasses = grades.reduce((acc, curr) => acc + curr.numClasses, 0);
-    
-    if (allSubjects.length === 0) {
-      toast.error(t.addSubject);
+    if (grades.length === 0) {
+      toast.error(t.addGradesFirst);
       return;
     }
 
     setIsSuggesting(true);
     try {
       toast.info(`${t.suggestTeachers}...`);
-      const suggested = await suggestTeachers(allSubjects, totalClasses, lang);
+      const suggested = await suggestTeachers(grades, profile?.country || '', profile?.region || '', lang);
       setTeachers(suggested);
       toast.success(`${t.suggestTeachers} (${suggested.length})`);
     } catch (error) {
@@ -824,7 +944,13 @@ function ScheduleWizard({
   };
 
   const addTeacher = () => {
-    setTeachers([...teachers, { id: crypto.randomUUID(), name: '', preferredSubjects: [] }]);
+    setTeachers([...teachers, { 
+      id: crypto.randomUUID(), 
+      name: '', 
+      preferredSubjects: [], 
+      assignedClasses: [], 
+      targetHours: 0 
+    }]);
   };
 
   const updateTeacher = (id: string, updates: Partial<Teacher>) => {
@@ -835,22 +961,53 @@ function ScheduleWizard({
     setTeachers(teachers.filter(t => t.id !== id));
   };
 
+  const [editingTeacherClasses, setEditingTeacherClasses] = useState<string | null>(null);
+
+  const allClassLabels = useMemo(() => {
+    const labelsSet = new Set<string>();
+    grades.forEach(g => {
+      for (let i = 0; i < g.numClasses; i++) {
+        labelsSet.add(`${g.grade} ${String.fromCharCode(65 + i)}`);
+      }
+    });
+    return Array.from(labelsSet).sort();
+  }, [grades]);
+
+  const getTeacherLoad = (teacher: Teacher) => {
+    let load = 0;
+    const assignedClasses = teacher.assignedClasses || [];
+    const preferredSubjects = teacher.preferredSubjects || [];
+    
+    assignedClasses.forEach(clsLabel => {
+      const gradeNum = parseInt(clsLabel.split(' ')[0]);
+      const grade = grades.find(g => g.grade === gradeNum);
+      if (grade && grade.subjects) {
+        grade.subjects.forEach(sub => {
+          if (preferredSubjects.includes(sub.name)) {
+            load += sub.hoursPerWeek;
+          }
+        });
+      }
+    });
+    return load;
+  };
+
   return (
-    <Card className="border-none shadow-xl shadow-neutral-200/50">
+    <Card className="border-none shadow-xl shadow-neutral-200/50 dark:bg-neutral-900 dark:shadow-none">
       <CardHeader className="pb-4">
         <CardTitle className="text-2xl font-bold tracking-tight">{t.configTitle}</CardTitle>
-        <CardDescription>{t.configDesc}</CardDescription>
+        <CardDescription className="dark:text-neutral-400">{t.configDesc}</CardDescription>
       </CardHeader>
       <CardContent>
         <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
-          <TabsList className="grid grid-cols-3 w-full bg-neutral-100 p-1 rounded-xl">
-            <TabsTrigger value="grades" className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-sm">
+          <TabsList className="grid grid-cols-3 w-full bg-neutral-100 dark:bg-neutral-950 p-1.5 rounded-2xl border border-neutral-200/50 dark:border-neutral-800 shadow-inner">
+            <TabsTrigger value="grades" className="rounded-xl data-[state=active]:bg-white dark:data-[state=active]:bg-neutral-900 data-[state=active]:shadow-lg transition-all font-black text-[10px] uppercase tracking-[0.15em]">
               <School className="w-4 h-4 mr-2" /> {t.gradesAndSubjects}
             </TabsTrigger>
-            <TabsTrigger value="lessons" className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-sm">
+            <TabsTrigger value="lessons" className="rounded-xl data-[state=active]:bg-white dark:data-[state=active]:bg-neutral-900 data-[state=active]:shadow-lg transition-all font-black text-[10px] uppercase tracking-[0.15em]">
               <Calendar className="w-4 h-4 mr-2" /> {t.suggestedLessons}
             </TabsTrigger>
-            <TabsTrigger value="teachers" className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-sm">
+            <TabsTrigger value="teachers" className="rounded-xl data-[state=active]:bg-white dark:data-[state=active]:bg-neutral-900 data-[state=active]:shadow-lg transition-all font-black text-[10px] uppercase tracking-[0.15em]">
               <Users className="w-4 h-4 mr-2" /> {t.teachers}
             </TabsTrigger>
           </TabsList>
@@ -871,33 +1028,33 @@ function ScheduleWizard({
                   </div>
                 )}
                 {grades.map((g) => (
-                  <Card key={g.grade} className="border-neutral-100 shadow-none bg-neutral-50/50">
+                  <Card key={g.grade} className="border-neutral-100 dark:border-neutral-800 shadow-none bg-neutral-50/50 dark:bg-neutral-950/50">
                     <CardHeader className="p-4 flex flex-row items-center justify-between space-y-0">
                       <div className="flex items-center space-x-4">
-                        <Badge variant="secondary" className="h-8 w-8 rounded-full flex items-center justify-center p-0 text-sm font-bold">
+                        <Badge variant="secondary" className="h-8 w-8 rounded-full flex items-center justify-center p-0 text-sm font-bold bg-white dark:bg-neutral-800 shadow-sm">
                           {g.grade}
                         </Badge>
                         <div className="space-y-1">
-                          <CardTitle className="text-base">{t.grade} {g.grade}</CardTitle>
+                          <CardTitle className="text-base font-bold">{t.grade} {g.grade}</CardTitle>
                           <div className="flex items-center space-x-2">
-                            <Label className="text-xs text-neutral-500">{t.classes}:</Label>
+                            <Label className="text-xs text-neutral-500 font-bold uppercase tracking-widest">{t.classes}:</Label>
                             <Input 
                               type="number" 
-                              className="h-7 w-16 text-xs" 
+                              className="h-7 w-16 text-xs bg-white dark:bg-neutral-900 border-neutral-100 dark:border-neutral-800" 
                               value={g.numClasses} 
                               onChange={e => updateGrade(g.grade, { numClasses: parseInt(e.target.value) || 1 })}
                             />
                           </div>
                         </div>
                       </div>
-                      <Button variant="ghost" size="icon" onClick={() => removeGrade(g.grade)} className="text-neutral-400 hover:text-red-500">
+                      <Button variant="ghost" size="icon" onClick={() => removeGrade(g.grade)} className="text-neutral-300 hover:text-red-500 transition-colors">
                         <Trash2 className="w-4 h-4" />
                       </Button>
                     </CardHeader>
                     <CardContent className="p-4 pt-0 space-y-3">
                       <div className="flex justify-between items-center">
-                        <Label className="text-xs font-semibold uppercase tracking-wider text-neutral-400">{t.subject}</Label>
-                        <Button variant="ghost" size="sm" onClick={() => addSubject(g.grade)} className="h-7 text-xs">
+                        <Label className="text-[10px] font-black uppercase tracking-widest text-neutral-400">{t.subject}</Label>
+                        <Button variant="ghost" size="sm" onClick={() => addSubject(g.grade)} className="h-7 text-xs font-bold text-blue-600 hover:text-blue-700">
                           <Plus className="w-3 h-3 mr-1" /> {t.addSubject}
                         </Button>
                       </div>
@@ -906,7 +1063,7 @@ function ScheduleWizard({
                           <div key={idx} className="flex items-center space-x-2">
                             <Input 
                               placeholder={t.subject} 
-                              className="h-8 text-sm flex-1" 
+                              className="h-9 text-sm flex-1 bg-white dark:bg-neutral-900 border-neutral-100 dark:border-neutral-800 rounded-lg px-3" 
                               value={s.name} 
                               onChange={e => updateSubject(g.grade, idx, { name: e.target.value })}
                             />
@@ -914,13 +1071,13 @@ function ScheduleWizard({
                               <Input 
                                 type="number" 
                                 placeholder={t.hrs} 
-                                className="h-8 text-sm w-16" 
+                                className="h-9 text-sm w-16 bg-white dark:bg-neutral-900 border-neutral-100 dark:border-neutral-800 rounded-lg text-center" 
                                 value={s.hoursPerWeek} 
                                 onChange={e => updateSubject(g.grade, idx, { hoursPerWeek: parseInt(e.target.value) || 1 })}
                               />
-                              <span className="text-[10px] text-neutral-400 font-medium shrink-0">{t.hrsPerWeek}</span>
+                               <span className="text-[10px] text-neutral-400 font-black uppercase shrink-0 tracking-tighter">{t.hrsPerWeek}</span>
                             </div>
-                            <Button variant="ghost" size="icon" onClick={() => removeSubject(g.grade, idx)} className="h-8 w-8 text-neutral-400 hover:text-red-500">
+                            <Button variant="ghost" size="icon" onClick={() => removeSubject(g.grade, idx)} className="h-9 w-9 text-neutral-300 hover:text-red-500 transition-colors">
                               <Trash2 className="w-3 h-3" />
                             </Button>
                           </div>
@@ -935,7 +1092,7 @@ function ScheduleWizard({
 
           <TabsContent value="lessons" className="space-y-6 outline-none">
             <div className="flex justify-between items-center">
-              <h3 className="text-lg font-semibold">{t.suggestedLessons}</h3>
+              <h3 className="text-lg font-bold tracking-tight">{t.suggestedLessons}</h3>
               <Button 
                 onClick={async () => {
                   if (grades.length === 0) {
@@ -958,10 +1115,10 @@ function ScheduleWizard({
                 }} 
                 variant="outline" 
                 size="sm" 
-                className="rounded-full"
+                className="rounded-xl border-blue-100 dark:border-blue-900/30 text-blue-600 dark:text-blue-400 font-bold bg-blue-50/50 dark:bg-blue-900/10"
                 disabled={isSuggesting}
               >
-                {isSuggesting ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Plus className="w-4 h-4 mr-1" />}
+                {isSuggesting ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Plus className="w-4 h-4 mr-1 transition-transform group-hover:rotate-90" />}
                 {t.suggestedLessons} (AI)
               </Button>
             </div>
@@ -969,21 +1126,21 @@ function ScheduleWizard({
             <ScrollArea className="h-[400px] pr-4">
               <div className="space-y-4">
                 {grades.map(g => (
-                  <div key={g.grade} className="border rounded-xl p-4 bg-white shadow-sm">
-                    <h4 className="font-bold text-sm mb-3 flex items-center">
-                      <Badge variant="outline" className="mr-2">{g.grade}</Badge>
-                      {t.gradesAndSubjects.split(' ')[0]} {g.grade}
+                  <div key={g.grade} className="border border-neutral-100 dark:border-neutral-800 rounded-2xl p-5 bg-white dark:bg-neutral-900/40 shadow-sm">
+                    <h4 className="font-bold text-sm mb-4 flex items-center">
+                      <Badge variant="outline" className="mr-3 bg-neutral-50 dark:bg-neutral-800 text-neutral-600 dark:text-neutral-300 font-black px-2.5">{g.grade}</Badge>
+                      <span className="uppercase tracking-tight">{t.gradesAndSubjects.split(' ')[0]} {g.grade}</span>
                     </h4>
-                    <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+                    <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
                       {g.subjects.map((s, idx) => (
-                        <div key={idx} className="flex justify-between items-center bg-neutral-50 px-3 py-2 rounded-lg border border-neutral-100">
-                          <span className="text-xs font-medium truncate">{s.name}</span>
-                          <span className="text-[10px] font-bold text-neutral-400 ml-2">{s.hoursPerWeek}h</span>
+                        <div key={idx} className="flex justify-between items-center bg-neutral-50/50 dark:bg-neutral-950/50 px-3 py-2.5 rounded-xl border border-neutral-100 dark:border-neutral-800 transition-colors hover:border-blue-100 dark:hover:border-blue-900/40">
+                          <span className="text-[11px] font-bold truncate text-neutral-600 dark:text-neutral-300">{s.name}</span>
+                          <span className="text-[10px] font-black text-blue-500 bg-blue-50 dark:bg-blue-900/30 px-1.5 py-0.5 rounded ml-2 shrink-0">{s.hoursPerWeek}h</span>
                         </div>
                       ))}
                       {g.subjects.length === 0 && (
-                        <div className="col-span-full py-4 text-center text-xs text-neutral-400 italic">
-                          No subjects assigned. Use the AI button or "Grades" tab.
+                        <div className="col-span-full py-8 text-center text-xs text-neutral-400 font-bold uppercase tracking-widest bg-neutral-50/30 dark:bg-neutral-950/20 rounded-xl border border-dashed border-neutral-100 dark:border-neutral-800">
+                          {t.noSubjects}
                         </div>
                       )}
                     </div>
@@ -1019,57 +1176,167 @@ function ScheduleWizard({
                     <p className="text-neutral-400">No teachers added yet.</p>
                   </div>
                 )}
-                {teachers.map((t_item) => (
-                  <Card key={t_item.id} className="border-neutral-100 shadow-none bg-neutral-50/50">
-                    <CardHeader className="p-4 flex flex-row items-center justify-between space-y-0">
-                      <div className="flex-1 mr-4">
-                        <Input 
-                          placeholder={t.teacher} 
-                          className="h-9 font-medium" 
-                          value={t_item.name} 
-                          onChange={e => updateTeacher(t_item.id, { name: e.target.value })}
-                        />
-                      </div>
-                      <Button variant="ghost" size="icon" onClick={() => removeTeacher(t_item.id)} className="text-neutral-400 hover:text-red-500">
-                        <Trash2 className="w-4 h-4" />
-                      </Button>
-                    </CardHeader>
-                    <CardContent className="p-4 pt-0">
-                      <div className="space-y-2">
-                        <Label className="text-xs font-semibold uppercase tracking-wider text-neutral-400">{t.subject}</Label>
-                        <Input 
-                          placeholder={t.teacherPlaceholder} 
-                          className="h-8 text-sm" 
-                          value={t_item.preferredSubjects.join(', ')} 
-                          onChange={e => updateTeacher(t_item.id, { preferredSubjects: e.target.value.split(',').map(s => s.trim()).filter(s => s !== '') })}
-                        />
-                      </div>
-                    </CardContent>
-                  </Card>
-                ))}
+                {teachers.map((t_item, index) => {
+                  const currentLoad = getTeacherLoad(t_item);
+                  const isOverloaded = t_item.targetHours && currentLoad > t_item.targetHours;
+
+                  return (
+                    <motion.div
+                      key={t_item.id}
+                      initial={{ opacity: 0, x: -20 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      transition={{ delay: index * 0.05 }}
+                    >
+                      <Card className="border-neutral-100 dark:border-neutral-800 shadow-sm hover:shadow-md transition-shadow bg-white dark:bg-neutral-900/50 overflow-hidden">
+                        <div className={`h-1 w-full ${isOverloaded ? 'bg-red-500' : 'bg-blue-500'}`} />
+                        <CardHeader className="p-4 flex flex-row items-center justify-between space-y-0">
+                          <div className="flex-1 mr-4 space-y-3">
+                            <div className="flex items-center space-x-3">
+                              <div className="w-8 h-8 rounded-lg bg-neutral-100 dark:bg-neutral-800 flex items-center justify-center text-xs font-bold text-neutral-500">
+                                {t_item.name?.[0]?.toUpperCase() || '?'}
+                              </div>
+                              <Input 
+                                placeholder={t.teacher} 
+                                className="h-9 font-bold flex-1 bg-transparent border-none focus-visible:ring-0 px-0 text-base" 
+                                value={t_item.name} 
+                                onChange={e => updateTeacher(t_item.id, { name: e.target.value })}
+                              />
+                              <div className="flex items-center space-x-2 shrink-0 bg-neutral-50 dark:bg-neutral-800 px-2 py-1 rounded-md border border-neutral-100 dark:border-neutral-700">
+                                <Label className="text-[10px] uppercase font-black text-neutral-400">{t.target}:</Label>
+                                <Input 
+                                  type="number" 
+                                  className="h-6 w-12 text-xs border-none bg-transparent focus-visible:ring-0 p-0 text-center font-bold" 
+                                  value={t_item.targetHours} 
+                                  onChange={e => updateTeacher(t_item.id, { targetHours: parseInt(e.target.value) || 0 })}
+                                />
+                              </div>
+                            </div>
+                            <div className="flex items-center space-x-3">
+                              <Badge variant={isOverloaded ? "destructive" : "secondary"} className="text-[10px] px-2 py-0.5 font-bold uppercase tracking-wider">
+                                {t.load}: {currentLoad} {t.hrsPerWeek}
+                              </Badge>
+                              {t_item.targetHours! > 0 && (
+                                <div className="flex-1 h-1.5 bg-neutral-100 dark:bg-neutral-800 rounded-full overflow-hidden">
+                                  <div 
+                                    className={`h-full transition-all duration-500 ${isOverloaded ? 'bg-red-500' : 'bg-blue-500'}`} 
+                                    style={{ width: `${Math.min((currentLoad / t_item.targetHours!) * 100, 100)}%` }}
+                                  />
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                          <Button variant="ghost" size="icon" onClick={() => removeTeacher(t_item.id)} className="text-neutral-300 hover:text-red-500 transition-colors">
+                            <Trash2 className="w-4 h-4" />
+                          </Button>
+                        </CardHeader>
+                        <CardContent className="p-4 pt-0 space-y-4">
+                          <div className="space-y-2">
+                            <Label className="text-[10px] font-black uppercase tracking-widest text-neutral-400">{t.subject}</Label>
+                            <Input 
+                              placeholder={t.teacherPlaceholder} 
+                              className="h-8 text-xs bg-neutral-50 dark:bg-neutral-800/50 border-neutral-100 dark:border-neutral-700" 
+                              value={t_item.preferredSubjects.join(', ')} 
+                              onChange={e => updateTeacher(t_item.id, { preferredSubjects: e.target.value.split(',').map(s => s.trim()).filter(s => s !== '') })}
+                            />
+                          </div>
+
+                          <div className="space-y-2">
+                            <div className="flex justify-between items-center">
+                              <Label className="text-[10px] font-black uppercase tracking-widest text-neutral-400">{t.assignedClasses}</Label>
+                              <Button variant="link" size="sm" onClick={() => setEditingTeacherClasses(t_item.id)} className="h-4 p-0 text-[10px] font-bold text-blue-600">
+                                {t.edit}
+                              </Button>
+                            </div>
+                            <div className="flex flex-wrap gap-1.5">
+                              {(t_item.assignedClasses || []).length === 0 ? (
+                                <span className="text-[10px] text-neutral-400 italic bg-neutral-50 dark:bg-neutral-800 px-2 py-0.5 rounded uppercase font-bold tracking-tighter">{t.noClassesAssigned}</span>
+                              ) : (
+                                (t_item.assignedClasses || []).map(cls => (
+                                  <Badge key={cls} variant="outline" className="text-[10px] px-2 py-0 bg-white dark:bg-neutral-900 border-neutral-200 dark:border-neutral-700 font-bold">
+                                    {cls}
+                                  </Badge>
+                                ))
+                              )}
+                            </div>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    </motion.div>
+                  );
+                })}
               </div>
             </ScrollArea>
+
+            {/* Class Assignment Dialog */}
+            <Dialog open={!!editingTeacherClasses} onOpenChange={(open) => !open && setEditingTeacherClasses(null)}>
+              <DialogContent className="sm:max-w-[425px]">
+                <DialogHeader>
+                  <DialogTitle>{t.assignedClasses}</DialogTitle>
+                  <DialogDescription>
+                    {t.teacher}: {teachers.find(t => t.id === editingTeacherClasses)?.name || ''}
+                  </DialogDescription>
+                </DialogHeader>
+                <ScrollArea className="h-[300px] mt-4 pr-4">
+                  <div className="grid grid-cols-3 gap-2">
+                    {allClassLabels.map(cls => {
+                      const teacher = teachers.find(t => t.id === editingTeacherClasses);
+                      const isSelected = teacher?.assignedClasses?.includes(cls);
+                      
+                      return (
+                        <Button
+                          key={cls}
+                          variant={isSelected ? "default" : "outline"}
+                          size="sm"
+                          className="h-10 text-xs"
+                          onClick={() => {
+                            if (!teacher) return;
+                            const currentClasses = teacher.assignedClasses || [];
+                            const newClasses = isSelected
+                              ? currentClasses.filter(c => c !== cls)
+                              : [...currentClasses, cls];
+                            updateTeacher(teacher.id, { assignedClasses: newClasses });
+                          }}
+                        >
+                          {cls}
+                        </Button>
+                      );
+                    })}
+                  </div>
+                </ScrollArea>
+                <DialogFooter className="mt-4">
+                  <Button onClick={() => setEditingTeacherClasses(null)}>{t.done}</Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
           </TabsContent>
         </Tabs>
 
-        <div className="mt-8 flex justify-end">
+        <motion.div 
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="mt-12 p-6 bg-gradient-to-r from-blue-600 to-indigo-700 rounded-3xl shadow-xl shadow-blue-200 dark:shadow-none flex items-center justify-between"
+        >
+          <div className="text-white">
+            <h4 className="font-black uppercase tracking-tight text-lg leading-tight">{t.readyToBuild}</h4>
+            <p className="text-blue-100 text-xs font-bold uppercase tracking-widest opacity-80">{t.allConstraintsSet}</p>
+          </div>
           <Button 
             onClick={onGenerate} 
             disabled={isLoading}
             size="lg" 
-            className="px-8 h-12 bg-neutral-900 hover:bg-neutral-800 rounded-full"
+            className="px-10 h-14 bg-white text-blue-600 hover:bg-neutral-50 rounded-2xl font-black uppercase tracking-widest shadow-lg shadow-blue-900/20 group"
           >
             {isLoading ? (
               <>
-                <Loader2 className="mr-2 h-5 w-5 animate-spin" /> {t.generating}
+                <Loader2 className="mr-3 h-5 w-5 animate-spin" /> {t.generating}...
               </>
             ) : (
               <>
-                {t.generateSchedule} <Calendar className="ml-2 w-5 h-5" />
+                {t.generateSchedule} <Zap className="ml-3 w-5 h-5 group-hover:scale-125 transition-transform text-yellow-500 fill-yellow-500" />
               </>
             )}
           </Button>
-        </div>
+        </motion.div>
       </CardContent>
     </Card>
   );
@@ -1083,6 +1350,7 @@ function ScheduleResultView({
   onUpdateSchedule,
   allTeachers,
   allGrades,
+  profile,
   t,
   lang
 }: { 
@@ -1093,15 +1361,18 @@ function ScheduleResultView({
   onUpdateSchedule: (newSchedule: any[]) => void,
   allTeachers: Teacher[],
   allGrades: GradeConfig[],
+  profile: UserProfile | null,
   t: any,
   lang: Language
 }) {
-  const [activeTab, setActiveTab] = useState('grid');
+  const [activeTab, setActiveTab] = useState('cards');
+  const [refreshKey, setRefreshKey] = useState(0);
+
   const [editingSlot, setEditingSlot] = useState<{ day: string, slot: string, cls: string, grade: number, className: string } | null>(null);
   const [editData, setEditData] = useState({ subject: '', teacher: '' });
 
   // Map day names to translated versions
-  const dayNameMap: Record<string, string> = {
+  const dayNameMap: Record<string, string> = useMemo(() => ({
     "Monday": t.days.monday,
     "Tuesday": t.days.tuesday,
     "Wednesday": t.days.wednesday,
@@ -1109,23 +1380,28 @@ function ScheduleResultView({
     "Friday": t.days.friday,
     "Saturday": t.days.saturday,
     "Sunday": t.days.sunday,
-  };
+  }), [t]);
 
   // Helper to generate expected class labels for all configured grades
   const expectedClassNames = useMemo(() => {
-    const names: string[] = [];
+    const namesSet = new Set<string>();
     [...allGrades].sort((a, b) => a.grade - b.grade).forEach(g => {
       for (let i = 0; i < g.numClasses; i++) {
         const label = String.fromCharCode(65 + i); // A, B, C...
-        names.push(`${g.grade} ${label}`);
+        namesSet.add(`${g.grade} ${label}`);
       }
     });
-    return names;
+    return Array.from(namesSet);
   }, [allGrades]);
 
-  const days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
+  const days = useMemo(() => ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"], []);
+
+  const normalizeT = normalizeTime;
   
-  const classNames = expectedClassNames.length > 0 ? expectedClassNames : Array.from(new Set(result.schedule.map(e => `${e.grade} ${e.className}`))).sort();
+  const classNames = useMemo(() => {
+    if (expectedClassNames.length > 0) return expectedClassNames;
+    return Array.from(new Set(result.schedule.map(e => `${e.grade} ${e.className}`))).sort();
+  }, [expectedClassNames, result.schedule]);
 
   const DEFAULT_SLOTS = [
     "08:00-08:45",
@@ -1138,49 +1414,35 @@ function ScheduleResultView({
     "13:50-14:35",
   ];
 
-  // Get all unique time slots plus default ones
-  const timeSlots = Array.from(new Set([
-    ...DEFAULT_SLOTS,
-    ...result.schedule.map(e => `${e.startTime}-${e.endTime}`)
-  ])).sort();
+  // Get all unique time slots plus default ones - Robustly sorted and normalized
+  const timeSlots = useMemo(() => {
+    const rawSlots = [
+      ...DEFAULT_SLOTS,
+      ...result.schedule.map(e => `${e.startTime}-${e.endTime}`)
+    ];
+    
+    const normalized = Array.from(new Set(rawSlots.filter(s => s.includes('-')).map(slot => {
+      const [s, e] = slot.split('-');
+      return `${normalizeT(s)}-${normalizeT(e)}`;
+    })));
+    
+    return normalized.sort((a, b) => {
+      const aStart = a.split('-')[0].replace(/\D/g, '').padStart(4, '0');
+      const bStart = b.split('-')[0].replace(/\D/g, '').padStart(4, '0');
+      return aStart.localeCompare(bStart);
+    });
+  }, [result.schedule]);
 
   // Robust matching helper
-  const isMatch = (e: any, day: string, slot: string, clsLabel: string) => {
-    // Normalize time to HH:mm format
-    const normalizeT = (tStr: string) => {
-      const match = tStr.match(/(\d{1,2}):(\d{2})/);
-      if (!match) return tStr;
-      return `${match[1].padStart(2, '0')}:${match[2]}`;
-    };
-
-    const eStart = normalizeT(e.startTime);
-    const eEnd = normalizeT(e.endTime);
-    const [sStart, sEnd] = slot.split('-').map(normalizeT);
-    
-    const timeMatch = eStart === sStart && eEnd === sEnd;
-    
-    // Normalize day
-    const eDay = e.day.trim().toLowerCase();
-    const targetDay = day.trim().toLowerCase();
-    const dayMatch = eDay === targetDay || (eDay.length >= 3 && targetDay.startsWith(eDay)) || (targetDay.length >= 3 && eDay.startsWith(targetDay));
-
-    // Normalize class matching
-    const labelGrade = parseInt(clsLabel.split(' ')[0]);
-    const labelClass = clsLabel.split(' ').pop();
-    
-    const labelMatch = `${e.grade} ${e.className}` === clsLabel || 
-                      (e.grade === labelGrade && e.className === labelClass);
-
-    return timeMatch && dayMatch && labelMatch;
-  };
+  const isMatch = isLessonMatch;
 
   const handleEditCell = (day: string, slot: string, clsLabel: string) => {
-    const entry = result.schedule.find(e => isMatch(e, day, slot, clsLabel));
+    const entry = result.schedule.find(e => isMatch(e as any, day, slot, clsLabel));
     
-    const match = clsLabel.match(/(\d+) (.+)/);
-    if (!match) return;
-    const gradeNum = parseInt(match[1]);
-    const classNameVal = match[2];
+    const labelParts = clsLabel.split(' ');
+    if (labelParts.length < 2) return;
+    const gradeNum = parseInt(labelParts[0]);
+    const classNameVal = labelParts.slice(1).join(' ');
 
     setEditingSlot({ day, slot, cls: clsLabel, grade: gradeNum, className: classNameVal });
     setEditData({ 
@@ -1194,7 +1456,7 @@ function ScheduleResultView({
 
     const [start, end] = editingSlot.slot.split('-');
     const newSchedule = [...result.schedule];
-    const index = newSchedule.findIndex(e => isMatch(e, editingSlot.day, editingSlot.slot, editingSlot.cls));
+    const index = newSchedule.findIndex(e => isMatch(e as any, editingSlot.day, editingSlot.slot, editingSlot.cls));
 
     if (index !== -1) {
       if (editData.subject === '' && editData.teacher === '') {
@@ -1237,50 +1499,150 @@ function ScheduleResultView({
         <Button variant="ghost" onClick={onBack} className="rounded-full">
           <ChevronLeft className="mr-2 w-4 h-4" /> {t.backToConfig}
         </Button>
-        <div className="flex items-center space-x-2">
-          <Badge variant={result.conflicts.length > 0 ? "destructive" : "default"} className="rounded-full">
+        <div className="flex items-center space-x-3">
+          <Badge variant={result.conflicts.length > 0 ? "destructive" : "secondary"} className="rounded-xl px-4 py-1.5 text-[10px] uppercase font-black tracking-widest h-10 flex items-center bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400 border-blue-100 dark:border-blue-800">
             {result.conflicts.length} {t.conflicts}
           </Badge>
-          <Button variant="outline" className="rounded-full" onClick={onRegenerate} disabled={isLoading}>
-            {isLoading ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Calendar className="mr-2 w-4 h-4" />}
+          <Button variant="outline" className="rounded-2xl h-10 border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 font-bold uppercase text-[10px] tracking-widest shadow-sm hover:scale-105 active:scale-95 transition-all px-6" onClick={onRegenerate} disabled={isLoading}>
+            {isLoading ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Zap className="mr-2 w-4 h-4 text-yellow-500 fill-yellow-500" />}
             {t.regenerate}
           </Button>
-          <Button variant="outline" className="rounded-full" onClick={() => exportScheduleToExcel(result.schedule)}>
-            <Download className="mr-2 w-4 h-4" /> {t.downloadExcel}
+          <Button variant="outline" className="rounded-2xl h-10 border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 font-bold uppercase text-[10px] tracking-widest shadow-sm hover:scale-105 active:scale-95 transition-all px-6" onClick={() => exportScheduleToExcel(result.schedule)}>
+            <Download className="mr-2 w-4 h-4 text-blue-600" /> {t.downloadExcel}
           </Button>
-          <Button variant="outline" className="rounded-full" onClick={() => window.print()}>
-            {t.printSchedule}
+          <Button variant="outline" className="rounded-2xl h-10 border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 font-bold uppercase text-[10px] tracking-widest shadow-sm hover:scale-105 active:scale-95 transition-all px-6" onClick={() => window.print()}>
+            <CheckCircle2 className="mr-2 w-4 h-4 text-emerald-500" /> {t.printSchedule}
           </Button>
         </div>
       </div>
 
       <div className="grid grid-cols-1 gap-6">
-        <Card className="border-none shadow-lg shadow-neutral-200/50 overflow-hidden">
-          <CardHeader className="bg-neutral-900 text-white">
-            <CardTitle className="text-xl font-bold">{t.schoolScheduleGrid}</CardTitle>
-            <CardDescription className="text-neutral-400">{t.editLessonDesc}</CardDescription>
+        <Card className="border-none shadow-2xl shadow-blue-500/10 overflow-hidden bg-white dark:bg-neutral-900">
+          <div className="h-1.5 w-full bg-gradient-to-r from-blue-600 via-indigo-600 to-violet-600" />
+          <CardHeader className="bg-neutral-50/50 dark:bg-neutral-950/50 border-b border-neutral-100 dark:border-neutral-800">
+            <div className="flex justify-between items-end">
+              <div>
+                <CardTitle className="text-2xl font-black uppercase tracking-tight text-neutral-900 dark:text-white">{t.schoolScheduleGrid}</CardTitle>
+                <CardDescription className="text-neutral-400 font-bold text-[10px] uppercase tracking-widest mt-1">{t.editLessonDesc}</CardDescription>
+              </div>
+              <div className="text-right">
+                <p className="text-[10px] font-black text-neutral-400 uppercase tracking-widest">{t.total}</p>
+                <p className="text-2xl font-black text-blue-600 leading-none">{result.schedule.length}</p>
+              </div>
+            </div>
           </CardHeader>
           <CardContent className="p-0">
-            <Tabs value={activeTab} onValueChange={setActiveTab}>
-              <div className="px-6 pt-4">
-                <TabsList className="bg-neutral-100">
-                  <TabsTrigger value="grid">{t.gridView}</TabsTrigger>
-                  <TabsTrigger value="list">{t.listView}</TabsTrigger>
-                  <TabsTrigger value="lessons">{t.suggestedLessons}</TabsTrigger>
-                  <TabsTrigger value="conflicts">{t.conflicts}</TabsTrigger>
+            <Tabs key={refreshKey} value={activeTab} onValueChange={setActiveTab}>
+              <div className="px-6 pt-6">
+                <TabsList className="bg-neutral-100 dark:bg-neutral-950 p-1.5 rounded-2xl border border-neutral-200/50 dark:border-neutral-800 shadow-inner w-full sm:w-auto">
+                  <TabsTrigger value="cards" className="rounded-xl data-[state=active]:bg-white dark:data-[state=active]:bg-neutral-900 data-[state=active]:shadow-md transition-all font-black text-[10px] uppercase tracking-widest px-6">
+                    <LayoutGrid className="w-4 h-4 mr-2" /> {t.classView}
+                  </TabsTrigger>
+                  <TabsTrigger value="grid" className="rounded-xl data-[state=active]:bg-white dark:data-[state=active]:bg-neutral-900 data-[state=active]:shadow-md transition-all font-black text-[10px] uppercase tracking-widest px-6">
+                    <Calendar className="w-4 h-4 mr-2" /> {t.gridView}
+                  </TabsTrigger>
+                  <TabsTrigger value="list" className="rounded-xl data-[state=active]:bg-white dark:data-[state=active]:bg-neutral-900 data-[state=active]:shadow-md transition-all font-black text-[10px] uppercase tracking-widest px-6">
+                    <List className="w-4 h-4 mr-2" /> {t.listView}
+                  </TabsTrigger>
+                  <TabsTrigger value="conflicts" className="rounded-xl data-[state=active]:bg-red-600 dark:data-[state=active]:bg-red-900 data-[state=active]:text-white data-[state=active]:shadow-md transition-all font-black text-[10px] uppercase tracking-widest px-6">
+                    <AlertCircle className="w-4 h-4 mr-2" /> {t.conflicts}
+                  </TabsTrigger>
                 </TabsList>
               </div>
               
+              <TabsContent value="cards" className="p-6">
+                <div className="grid grid-cols-1 xl:grid-cols-2 gap-8">
+                  {classNames.map(cls => {
+                    const classEntries = result.schedule.filter(e => isLessonMatch(e as any, e.day, `${e.startTime}-${e.endTime}`, cls));
+                    return (
+                      <Card key={cls} className="border-none shadow-sm dark:bg-neutral-950 overflow-hidden outline outline-1 outline-neutral-100 dark:outline-neutral-800">
+                        <CardHeader className="bg-neutral-50/50 dark:bg-neutral-900/20 py-4 px-6 border-b border-neutral-100 dark:border-neutral-800">
+                          <div className="flex justify-between items-center">
+                            <CardTitle className="text-xl font-black uppercase tracking-tight text-blue-600 dark:text-blue-400">
+                              {cls}
+                            </CardTitle>
+                            <Badge variant="outline" className="text-[10px] font-black uppercase tracking-widest bg-white dark:bg-neutral-900">
+                              {classEntries.length} {t.total} {t.hrs.toLowerCase()}
+                            </Badge>
+                          </div>
+                        </CardHeader>
+                        <CardContent className="p-0">
+                          <div className="divide-y divide-neutral-50 dark:divide-neutral-900">
+                            {days.map(day => {
+                              const dayEntries = classEntries.filter(e => {
+                                return getCanonicalDay(e.day) === getCanonicalDay(day);
+                              });
+
+                              return (
+                                <div key={day} className="p-0">
+                                  <div className="bg-neutral-50/30 dark:bg-neutral-900/10 px-6 py-2 border-b border-neutral-100 dark:border-neutral-900">
+                                    <p className="text-[10px] font-black uppercase tracking-[0.2em] text-neutral-400">
+                                      {dayNameMap[day] || day}
+                                    </p>
+                                  </div>
+                                  <div className="divide-y divide-neutral-50 dark:divide-neutral-900">
+                                    {dayEntries.length > 0 ? (
+                                      dayEntries.sort((a, b) => a.startTime.localeCompare(b.startTime)).map((entry, idx) => {
+                                        const color = getSubjectColor(entry.subject);
+                                        return (
+                                          <div 
+                                            key={idx} 
+                                            className="flex items-center px-6 py-4 hover:bg-neutral-50 dark:hover:bg-neutral-900/30 transition-colors group cursor-pointer"
+                                            onClick={() => handleEditCell(day, entry.startTime + "-" + entry.endTime, cls)}
+                                          >
+                                            <div className="w-16 shrink-0">
+                                              <p className="text-xs font-black font-mono text-neutral-400 group-hover:text-neutral-600 dark:group-hover:text-neutral-200 transition-colors">
+                                                {entry.startTime}
+                                              </p>
+                                            </div>
+                                            <div className={`ml-4 flex-1 px-4 py-2 rounded-2xl border shadow-sm transition-all group-hover:shadow-md ${color}`}>
+                                              <div className="flex justify-between items-center">
+                                                <p className="text-xs font-black uppercase tracking-tighter flex items-center">
+                                                  <BookOpen className="w-3 h-3 mr-2 opacity-60 shrink-0" />
+                                                  {localizeSubject(entry.subject, t)}
+                                                </p>
+                                                <div className="flex items-center space-x-2 text-[10px] font-bold opacity-60">
+                                                  <Clock className="w-3 h-3" />
+                                                  <span>{entry.startTime}-{entry.endTime}</span>
+                                                </div>
+                                              </div>
+                                              <div className="flex items-center mt-1 text-[10px] font-bold opacity-70">
+                                                <User className="w-3 h-3 mr-2 opacity-50 shrink-0" />
+                                                <span className="truncate">{entry.teacher}</span>
+                                              </div>
+                                            </div>
+                                          </div>
+                                        );
+                                      })
+                                    ) : (
+                                      <div className="px-6 py-8 text-center bg-neutral-50/20 dark:bg-neutral-900/5">
+                                        <p className="text-[10px] font-black uppercase tracking-tight text-neutral-300">
+                                          {t.noLessonsScheduled}
+                                        </p>
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </CardContent>
+                      </Card>
+                    );
+                  })}
+                </div>
+              </TabsContent>
+              
               <TabsContent value="grid" className="p-6">
-                <div className="overflow-x-auto border rounded-xl">
+                <div className="overflow-x-auto border border-neutral-100 dark:border-neutral-800 rounded-2xl shadow-sm">
                   <table className="w-full border-collapse text-sm">
                     <thead>
-                      <tr className="bg-neutral-50">
-                        <th className="border p-2 text-left bg-neutral-100 w-24">{t.kun}</th>
-                        <th className="border p-2 text-center bg-neutral-100 w-12">#</th>
-                        <th className="border p-2 text-center bg-neutral-100 w-32">{t.vaqt}</th>
+                      <tr className="bg-neutral-50 dark:bg-neutral-950">
+                        <th className="border border-neutral-100 dark:border-neutral-800 p-3 text-left bg-neutral-100/50 dark:bg-neutral-950 w-24 text-[10px] font-black uppercase tracking-widest text-neutral-400">{t.kun}</th>
+                        <th className="border border-neutral-100 dark:border-neutral-800 p-3 text-center bg-neutral-100/50 dark:bg-neutral-950 w-12 text-[10px] font-black uppercase tracking-widest text-neutral-400">#</th>
+                        <th className="border border-neutral-100 dark:border-neutral-800 p-3 text-center bg-neutral-100/50 dark:bg-neutral-950 w-32 text-[10px] font-black uppercase tracking-widest text-neutral-400">{t.vaqt}</th>
                         {classNames.map(cls => (
-                          <th key={cls} className="border p-2 text-center bg-yellow-400 font-bold min-w-[150px]">
+                          <th key={cls} className="border border-neutral-200 dark:border-neutral-800 p-3 text-center bg-blue-600 dark:bg-blue-700 text-white font-black uppercase tracking-widest text-[10px] min-w-[150px] shadow-inner">
                             {cls}
                           </th>
                         ))}
@@ -1289,38 +1651,53 @@ function ScheduleResultView({
                     <tbody>
                       {days.map((day) => {
                         const daySlots = timeSlots;
+                        
+                        // Local cache for speed in heavy grids
+                        const daySchedule = result.schedule.filter(e => {
+                          return getCanonicalDay(e.day) === getCanonicalDay(day);
+                        });
 
                         return daySlots.map((slot, slotIdx) => {
-                          const [start, end] = slot.split('-');
+                          const slotParts = slot.split('-');
+                          const start = slotParts[0] || '';
+                          const end = slotParts[1] || '';
+                          
                           return (
-                            <tr key={`${day}-${slot}`}>
+                            <tr key={`${day}-${slot}`} className={slotIdx % 2 === 0 ? "bg-white dark:bg-neutral-900" : "bg-neutral-50/50 dark:bg-neutral-800/20"}>
                               {slotIdx === 0 && (
                                 <td 
-                                  className="border p-2 font-bold bg-neutral-50 text-center align-middle" 
+                                  className="border border-neutral-200 dark:border-neutral-800 p-2 font-black bg-neutral-100 dark:bg-neutral-950 text-center align-middle text-[10px] uppercase tracking-widest text-neutral-500" 
                                   rowSpan={daySlots.length}
-                                  style={{ writingMode: 'vertical-rl', transform: 'rotate(180deg)' }}
+                                  style={{ writingMode: 'vertical-rl', transform: 'rotate(180deg)', minWidth: '40px' }}
                                 >
                                   {dayNameMap[day] || day}
                                 </td>
                               )}
-                              <td className="border p-2 text-center font-medium">{slotIdx + 1}</td>
-                              <td className="border p-2 text-center text-xs">{start}-{end}</td>
+                              <td className="border border-neutral-100 dark:border-neutral-800 p-2 text-center font-black text-[10px] text-neutral-400 bg-white/30 dark:bg-neutral-900/30">{slotIdx + 1}</td>
+                              <td className="border border-neutral-100 dark:border-neutral-800 p-2 text-center text-[9px] font-black text-neutral-500 bg-white/30 dark:bg-neutral-900/30 tracking-tighter w-24">{start}-{end}</td>
                               {classNames.map(cls => {
-                                const entry = result.schedule.find(e => isMatch(e, day, slot, cls));
+                                const entry = daySchedule.find(e => isMatch(e as any, day, slot, cls));
+                                const colorClass = entry ? getSubjectColor(entry.subject || '') : '';
                                 return (
                                   <td 
                                     key={cls} 
-                                    className="border p-2 text-center cursor-pointer hover:bg-neutral-50 transition-colors group relative"
+                                    className="border border-neutral-100 dark:border-neutral-800 p-1 relative min-w-[140px] group cursor-pointer hover:bg-blue-50/20 dark:hover:bg-blue-900/10 transition-all"
                                     onClick={() => handleEditCell(day, slot, cls)}
                                   >
                                     {entry ? (
-                                      <div className="space-y-1">
-                                        <div className="font-bold">{entry.subject}</div>
-                                        <div className="text-xs text-neutral-500">{entry.teacher}</div>
+                                      <div className={`p-2.5 rounded-xl border shadow-sm transition-all group-hover:shadow-md group-hover:scale-[1.02] active:scale-95 ${colorClass}`}>
+                                        <div className="text-[10px] font-black uppercase tracking-tighter mb-1 select-none flex items-center">
+                                          <BookOpen className="w-3 h-3 mr-1 opacity-60" />
+                                          <span className="truncate">{localizeSubject(entry.subject || '', t)}</span>
+                                        </div>
+                                        <div className="flex items-center text-[9px] font-bold opacity-70">
+                                          <User className="w-2.5 h-2.5 mr-1 opacity-50 shrink-0" />
+                                          <span className="truncate">{entry.teacher}</span>
+                                        </div>
                                       </div>
                                     ) : (
-                                      <div className="h-8 flex items-center justify-center">
-                                        <Plus className="w-4 h-4 text-neutral-200 group-hover:text-neutral-400" />
+                                      <div className="h-12 flex items-center justify-center border-2 border-dashed border-neutral-50 dark:border-neutral-800 rounded-xl group-hover:border-blue-100/50 transition-colors">
+                                        <Plus className="w-3 h-3 text-neutral-200 dark:text-neutral-800 group-hover:text-blue-300" />
                                       </div>
                                     )}
                                   </td>
@@ -1355,7 +1732,7 @@ function ScheduleResultView({
                           <TableCell>
                             <Badge variant="outline" className="text-[10px]">{entry.grade} {entry.className}</Badge>
                           </TableCell>
-                          <TableCell className="font-medium">{entry.subject}</TableCell>
+                          <TableCell className="font-medium">{localizeSubject(entry.subject, t)}</TableCell>
                           <TableCell className="text-neutral-600">{entry.teacher}</TableCell>
                         </TableRow>
                       ))}
@@ -1393,7 +1770,7 @@ function ScheduleResultView({
                             {Object.entries(subjectCounts).length > 0 ? (
                               Object.entries(subjectCounts).sort((a, b) => b[1] - a[1]).map(([subject, count]) => (
                                 <div key={subject} className="flex justify-between items-center p-3 hover:bg-neutral-50 transition-colors">
-                                  <span className="text-xs font-medium text-neutral-700">{subject}</span>
+                                  <span className="text-xs font-medium text-neutral-700">{localizeSubject(subject, t)}</span>
                                   <Badge variant="outline" className="text-[10px] font-bold">
                                     {count} {t.hrsPerWeek}
                                   </Badge>
@@ -1458,7 +1835,7 @@ function ScheduleResultView({
                     <SelectContent>
                       <SelectItem value="">{t.none}</SelectItem>
                       {availableSubjects.map(s => (
-                        <SelectItem key={s} value={s}>{s}</SelectItem>
+                        <SelectItem key={s} value={s}>{localizeSubject(s, t)}</SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
